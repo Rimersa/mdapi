@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "market-data-api"
+version = "0.4.0"
+description = "Read-only, five-minute-partitioned market data API and local incremental cache"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+client = [
+  "pyarrow>=15",
+]
+api = [
+  "pyarrow>=15",
+  "psutil>=5.9",
+  "fastapi>=0.115",
+  "uvicorn>=0.30",
+]
+builder = [
+  "pyarrow>=15",
+  "polars>=1.38",
+]
+test = [
+  "pyarrow>=15",
+  "psutil>=5.9",
+  "fastapi>=0.115",
+  "uvicorn>=0.30",
+  "pytest>=8",
+]
+
+[project.scripts]
+mdapi = "market_data_api.cli:main"
+mdapi-gateway = "market_data_api.gateway:main"
+mdapi-build = "market_data_api.builder:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

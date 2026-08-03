@@ -1,0 +1,47 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  create:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    if: >-
+      github.event_name != 'create' ||
+      github.ref == 'refs/heads/release/v0.4.0'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install test dependencies
+        run: python -m pip install '.[test]'
+      - name: Verify release source
+        run: python -m pytest -q
+      - name: Build release package
+        run: python tools/build_release.py
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RELEASE_TAG="${GITHUB_REF_NAME}"
+          if [[ "${GITHUB_REF_TYPE}" != "tag" ]]; then
+            RELEASE_TAG="v0.4.0"
+          fi
+          gh release create "${RELEASE_TAG}" \
+            --target "${GITHUB_SHA}" \
+            dist/market-data-api-0.4.0-easy-install.tar.gz \
+            dist/market-data-api-0.4.0-easy-install.tar.gz.sha256 \
+            dist/market-data-api-0.4.0/SHA256SUMS \
+            dist/market-data-api-0.4.0/bin/mdapi-gateway.pyz \
+            dist/market-data-api-0.4.0/wheels/market_data_api-0.4.0-py3-none-any.whl \
+            --title "Market Data API 0.4.0" \
+            --notes-file RELEASE_NOTES.md

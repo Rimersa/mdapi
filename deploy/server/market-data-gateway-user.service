@@ -1,0 +1,22 @@
+[Unit]
+Description=Market Data read-only gateway (user service)
+Wants=network-online.target
+After=network-online.target local-fs.target
+
+[Service]
+Type=simple
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=%h/.config/market-data-api-server/gateway.env
+ExecStart=/usr/bin/python3 %h/.local/share/market-data-api-server/mdapi-gateway.pyz --root ${MDAPI_DATA_ROOT} --host ${MDAPI_GATEWAY_HOST} --port ${MDAPI_GATEWAY_PORT} --max-streams ${MDAPI_MAX_STREAMS} --queue-timeout ${MDAPI_QUEUE_TIMEOUT} --token-file ${MDAPI_TOKEN_FILE}
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=30
+KillSignal=SIGTERM
+UMask=0077
+LimitNOFILE=65536
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target
