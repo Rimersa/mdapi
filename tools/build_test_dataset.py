@@ -1,3 +1,8 @@
+"""内部开发工具：只用于制作和复现五天性能测试样本。
+
+它不是网关、客户端、服务器部署步骤或生产每日数据任务。
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -15,7 +20,7 @@ import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from .catalog import (
+from market_data_api.catalog import (
     CatalogStore,
     ObjectEntry,
     SourceIdentity,
@@ -23,7 +28,7 @@ from .catalog import (
     bucket_iso,
     source_fingerprint,
 )
-from .model import DATASETS
+from market_data_api.model import DATASETS
 
 DEFAULT_SOURCE_ROOT = Path("/data/market_data_lake/lake/curated")
 DEFAULT_STAGING_ROOT = Path("/dev/shm/market_data_api_builder")

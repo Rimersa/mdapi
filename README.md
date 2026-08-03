@@ -1,6 +1,6 @@
 # Market Data API
 
-当前发布版本：`0.4.0`。默认使用一键安装，见
+当前发布版本：`0.4.1`。默认使用一键安装，见
 [`QUICKSTART.md`](QUICKSTART.md)；手工部署细节见
 [`DEPLOYMENT.md`](DEPLOYMENT.md)。
 
@@ -18,29 +18,19 @@
 - `direct`：边拉边用，不持久化；
 - `cache`：本地 SQLite 元数据库 + 版本化 Parquet 对象，按 5 分钟桶增量补齐；
 - 对象级自动重连续传：默认3次，已完成对象不重拉，cache保留已提交桶；
-- 固定根索引 + 数据集/交易日/版本分片catalog，历史增长不拖慢启动；
-- 可选离线构建器：只读原始湖，新日期或源指纹变化时发布新版本。
+- 固定根索引 + 数据集/交易日/版本分片catalog，历史增长不拖慢启动。
 
-生产网关本身不切数据。现有每日程序只需按
-[`SERVER_DATA_FORMAT.md`](SERVER_DATA_FORMAT.md) 产出五分钟成品目录和 catalog；构建器只是
-初始化、测试或尚无上游切片程序时的参考实现。
-
-原始数据目录固定为：
-
-```text
-/data/market_data_lake/lake/curated
-```
-
-构建器拒绝把任何输出或暂存目录放入原始数据目录，也不包含修改、覆盖、移动或删除
-原始文件的代码路径。
+生产网关本身不切数据，也不读原始数据湖。上游每日程序负责按
+[`SERVER_DATA_FORMAT.md`](SERVER_DATA_FORMAT.md) 产出五分钟 Parquet 成品目录和 catalog；
+网关只对这个独立成品目录进行只读服务。
 
 ## 数据流
 
 ```text
-87 原始湖（只读）
-        │
+上游每日数据程序
+        │ 原子发布5分钟成品
         ▼
-5 分钟增量构建器 ──> 独立派生目录/分片catalog v2
+                 独立成品目录/分片catalog v2
                               │
                               ▼
                     87 常驻零拷贝网关
@@ -88,31 +78,6 @@ python -m venv --system-site-packages .venv
 ```
 
 87 的网关只依赖 Python 标准库，不需要 FastAPI、DuckDB 或 PyArrow。
-
-## 构建与每日增量
-
-五天测试集使用独立目录：
-
-```bash
-PYTHONPATH=/home/quant/market_data_api/src \
-/home/quant/miniconda/envs/qmt310/bin/python -m market_data_api.builder \
-  --dest-root /home/quant/market_data_api_5m_example_v2 \
-  --latest 5 \
-  --threads 4 \
-  --execute
-```
-
-不加 `--execute` 只打印计划。每日任务可继续执行同一命令：
-
-- 源文件 size/mtime 列表产生 `source_fingerprint`；
-- 相同指纹和已发布版本直接跳过；
-- 新日期自动构建；
-- 历史日期被上游修订时产生新版本；
-- 构建期间源指纹发生变化则拒绝发布；
-- 暂存、行数与 schema 校验完成后才原子发布；
-- 旧派生版本默认保留，绝不涉及原始湖。
-
-建议上游只传最近若干日期，例如 `--latest 5`，避免每天遍历全部历史数据。
 
 ## 开发时手动启动87只读网关
 

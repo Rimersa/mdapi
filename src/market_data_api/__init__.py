@@ -17,4 +17,4 @@ __all__ = [
     "ServiceLimits",
     "UpdateMode",
 ]
-__version__ = "0.4.0"
+__version__ = "0.4.1"

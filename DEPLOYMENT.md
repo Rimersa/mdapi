@@ -1,4 +1,4 @@
-# Market Data API 0.4.0 部署说明
+# Market Data API 0.4.1 部署说明
 
 普通安装请直接使用 [`QUICKSTART.md`](QUICKSTART.md) 的两条命令。本文件解释一键
 安装背后的目录、配置、升级和排障方式。
@@ -8,7 +8,6 @@
 - 87服务器：`mdapi-gateway.pyz`，只依赖系统Python标准库；
 - 用户机器：本机FastAPI、PyArrow处理流水线和可选增量缓存；
 - 上游程序：按 [`SERVER_DATA_FORMAT.md`](SERVER_DATA_FORMAT.md) 生成五分钟成品数据；
-- `mdapi-build`：可选离线参考工具，不属于网关请求链路。
 
 数据请求不使用SSH。SSH只用于管理员复制发布包、升级和排障。
 
@@ -69,7 +68,7 @@ python3 tools/migrate_catalog_v2.py \
 ```
 
 该工具不读取或修改Parquet，只新增版本分片、当前指针和固定大小根索引。默认不留下旧
-格式副本；确需额外归档时增加`--keep-backup`。0.4.0网关仍可临时读取旧单文件catalog，
+格式副本；确需额外归档时增加`--keep-backup`。0.4.1网关仍可临时读取旧单文件catalog，
 但它会随历史线性膨胀，不应继续用于长期生产。
 
 状态和日志：
@@ -167,7 +166,7 @@ sudo ./install-server.sh /正式五分钟数据根目录
 本地API可以从任何语言使用。Python研究环境可额外安装`client`依赖：
 
 ```bash
-python -m pip install '/发布包目录/wheels/market_data_api-0.4.0-py3-none-any.whl[client]'
+python -m pip install '/发布包目录/wheels/market_data_api-0.4.1-py3-none-any.whl[client]'
 ```
 
 建议用`MarketDataClient.iter_batches()`逐批消费。`read_table()`会把完整结果物化到用户

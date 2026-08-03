@@ -39,7 +39,7 @@ CLIENT_INSTALL_ROOT="${CLIENT_DATA_PARENT}/market-data-api"
 CLIENT_CONFIG_ROOT="${CLIENT_CONFIG_PARENT}/market-data-api"
 CLIENT_VENV="${CLIENT_INSTALL_ROOT}/venv"
 CLIENT_CONFIG="${CLIENT_CONFIG_ROOT}/client.json"
-CLIENT_WHEEL="${CLIENT_PACKAGE_ROOT}/wheels/market_data_api-0.4.0-py3-none-any.whl"
+CLIENT_WHEEL="${CLIENT_PACKAGE_ROOT}/wheels/market_data_api-0.4.1-py3-none-any.whl"
 
 if [[ ! -f "${CLIENT_WHEEL}" ]]; then
   echo "发布包不完整：找不到 ${CLIENT_WHEEL}" >&2

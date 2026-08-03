@@ -12,7 +12,7 @@ if GATEWAY_ARCHIVE.is_file():
 else:
     sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from market_data_api.builder import DEFAULT_SOURCE_ROOT
+DEFAULT_SOURCE_ROOT = Path("/data/market_data_lake/lake/curated")
 
 
 def main() -> int:

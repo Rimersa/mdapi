@@ -8,7 +8,7 @@
 - Linux机器和Python 3.10或更高版本；
 - 能访问`10.10.10.87:18787`；
 - 管理员分配的个人令牌；
-- `market-data-api-0.4.0`发布包。
+- `market-data-api-0.4.1`发布包。
 
 每个用户必须使用自己的令牌。服务器零用户时处于锁定状态；管理员创建用户并交付令牌
 后才能取数。
@@ -16,8 +16,8 @@
 ## 2. 一次性安装
 
 ```bash
-tar -xzf market-data-api-0.4.0-easy-install.tar.gz
-cd market-data-api-0.4.0
+tar -xzf market-data-api-0.4.1-easy-install.tar.gz
+cd market-data-api-0.4.1
 ./install-client.sh 10.10.10.87
 ```
 
@@ -61,7 +61,7 @@ curl http://127.0.0.1:18788/health
 
 ```bash
 python -m pip install \
-  '/发布包目录/wheels/market_data_api-0.4.0-py3-none-any.whl[client]'
+  '/发布包目录/wheels/market_data_api-0.4.1-py3-none-any.whl[client]'
 ```
 
 推荐逐批消费：

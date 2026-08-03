@@ -12,18 +12,11 @@ def main(argv: list[str] | None = None) -> int:
         help="启动87只读数据网关",
         add_help=False,
     )
-    subparsers.add_parser(
-        "build",
-        help="构建/增量更新5分钟派生数据",
-        add_help=False,
-    )
     args, remaining = parser.parse_known_args(argv)
     if args.command == "serve-local":
         from .local_api import main as command
-    elif args.command == "serve-gateway":
-        from .gateway import main as command
     else:
-        from .builder import main as command
+        from .gateway import main as command
     return command(remaining)
 
 

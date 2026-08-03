@@ -65,7 +65,7 @@ mdapi-user remove alice
 研究环境安装轻量SDK：
 
 ```bash
-python -m pip install '/发布包目录/wheels/market_data_api-0.4.0-py3-none-any.whl[client]'
+python -m pip install '/发布包目录/wheels/market_data_api-0.4.1-py3-none-any.whl[client]'
 ```
 
 ```python

@@ -27,7 +27,6 @@ ADMIN_TOOLS = (
     "migrate_catalog_v2.py",
     "summarize_catalog.py",
     "prewarm.py",
-    "audit_source_immutability.py",
 )
 
 

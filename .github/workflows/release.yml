@@ -4,17 +4,12 @@ on:
   push:
     tags:
       - "v*"
-  create:
-  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
   release:
-    if: >-
-      github.event_name != 'create' ||
-      github.ref == 'refs/heads/release/v0.4.0'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,16 +27,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          RELEASE_TAG="${GITHUB_REF_NAME}"
-          if [[ "${GITHUB_REF_TYPE}" != "tag" ]]; then
-            RELEASE_TAG="v0.4.0"
-          fi
-          gh release create "${RELEASE_TAG}" \
+          RELEASE_VERSION="${GITHUB_REF_NAME#v}"
+          RELEASE_NAME="market-data-api-${RELEASE_VERSION}"
+          gh release create "${GITHUB_REF_NAME}" \
             --target "${GITHUB_SHA}" \
-            dist/market-data-api-0.4.0-easy-install.tar.gz \
-            dist/market-data-api-0.4.0-easy-install.tar.gz.sha256 \
-            dist/market-data-api-0.4.0/SHA256SUMS \
-            dist/market-data-api-0.4.0/bin/mdapi-gateway.pyz \
-            dist/market-data-api-0.4.0/wheels/market_data_api-0.4.0-py3-none-any.whl \
-            --title "Market Data API 0.4.0" \
+            "dist/${RELEASE_NAME}-easy-install.tar.gz" \
+            "dist/${RELEASE_NAME}-easy-install.tar.gz.sha256" \
+            "dist/${RELEASE_NAME}/SHA256SUMS" \
+            "dist/${RELEASE_NAME}/bin/mdapi-gateway.pyz" \
+            "dist/${RELEASE_NAME}/wheels/market_data_api-${RELEASE_VERSION}-py3-none-any.whl" \
+            --title "Market Data API ${RELEASE_VERSION}" \
             --notes-file RELEASE_NOTES.md
