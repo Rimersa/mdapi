@@ -57,7 +57,7 @@
 服务器管理员：
 
 ```bash
-sudo ./install-server.sh /正式五分钟数据根目录 alice bob carol dave
+sudo ./install-server.sh /正式五分钟数据根目录 alice bob carol dave（用户名示例）
 ```
 
 每位用户：
