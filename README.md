@@ -10,7 +10,7 @@
 普通用户完整手册见[`USER_GUIDE.md`](USER_GUIDE.md)，服务器输入文件格式见
 [`SERVER_DATA_FORMAT.md`](SERVER_DATA_FORMAT.md)。
 
-这是一个独立于 acelab 的市场数据服务。它假设 87 上已经存在按 5 分钟切好的、
+这是一个独立的市场数据服务。它假设 87 上已经存在按 5 分钟切好的、
 只读 Parquet 派生数据，并提供：
 
 - 87 常驻只读网关：只选择文件并用 `sendfile` 零拷贝发送，不运行查询；
