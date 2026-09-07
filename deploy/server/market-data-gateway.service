@@ -21,6 +21,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
+ReadWritePaths=/var/cache/market-data-api
 
 [Install]
 WantedBy=multi-user.target

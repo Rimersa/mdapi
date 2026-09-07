@@ -1,5 +1,4 @@
 import argparse
-import datetime as dt
 import json
 import os
 from contextlib import asynccontextmanager
@@ -92,9 +91,7 @@ def _resolve_config(args: argparse.Namespace) -> LocalAPIConfig:
         "MDAPI_MAX_RESPONSE_GIB",
         "max_response_gib",
     )
-    max_response_gib = (
-        float(max_response_raw) if max_response_raw is not None else None
-    )
+    max_response_gib = float(max_response_raw) if max_response_raw is not None else None
     arrow_compression = str(
         choose(
             args.arrow_compression,
@@ -166,9 +163,7 @@ def create_app(service: DataService):
         from fastapi.responses import StreamingResponse
         from pydantic import BaseModel, Field, ConfigDict
     except ImportError as exc:
-        raise RuntimeError(
-            "本机 API 依赖未安装；请安装 market-data-api[api]"
-        ) from exc
+        raise RuntimeError("本机 API 依赖未安装；请安装 market-data-api[api]") from exc
 
     class DataQuery(BaseModel):
         model_config = ConfigDict(extra="forbid")
@@ -285,29 +280,30 @@ def create_app(service: DataService):
             except BaseException:
                 stream.close()
                 raise
+
             def primed_stream():
                 try:
                     yield first_chunk
                     yield from stream
                 finally:
                     stream.close()
+
             headers = {
                 "X-MDAPI-Source-Bytes": str(plan.selection.source_bytes),
                 "X-MDAPI-Estimated-Uncompressed-Bytes": str(
                     plan.selection.uncompressed_bytes
                 ),
-                "X-MDAPI-Estimated-Arrow-Memory": str(
-                    plan.estimated_arrow_memory
-                ),
-                "X-MDAPI-Estimated-Working-Memory": str(
-                    plan.estimated_working_memory
-                ),
-                "X-MDAPI-Working-Memory-Limit": str(
-                    plan.working_memory_limit
-                ),
+                "X-MDAPI-Estimated-Arrow-Memory": str(plan.estimated_arrow_memory),
+                "X-MDAPI-Estimated-Working-Memory": str(plan.estimated_working_memory),
+                "X-MDAPI-Working-Memory-Limit": str(plan.working_memory_limit),
                 "X-MDAPI-Rows": str(plan.selection.rows),
                 "X-MDAPI-Mode": request.mode.value,
-                "X-MDAPI-Read-Path": "adaptive_ranges" if plan.selective else "whole_objects",
+                "X-MDAPI-Symbols-Applied": "true"
+                if request.symbols is not None
+                else "false",
+                "X-MDAPI-Read-Path": "adaptive_ranges"
+                if plan.selective
+                else "whole_objects",
                 "X-MDAPI-Missing-Cache-Bytes": str(plan.missing_cache_bytes),
             }
             return StreamingResponse(
@@ -368,7 +364,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--host")
     parser.add_argument("--port", type=int)
-    parser.add_argument("--io-profile", choices=("hdd", "ssd"), help="远端存储读盘模式；默认 hdd")
+    parser.add_argument(
+        "--io-profile", choices=("hdd", "ssd"), help="远端存储读盘模式；默认 hdd"
+    )
     parser.add_argument(
         "--cores",
         type=int,
@@ -408,9 +406,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         import uvicorn
     except ImportError as exc:
-        raise RuntimeError(
-            "本机 API 依赖未安装；请安装 market-data-api[api]"
-        ) from exc
+        raise RuntimeError("本机 API 依赖未安装；请安装 market-data-api[api]") from exc
     limits = ServiceLimits(
         max_response_uncompressed=(
             int(config.max_response_gib * 1024**3)
@@ -418,9 +414,7 @@ def main(argv: list[str] | None = None) -> int:
             else None
         ),
         arrow_compression=(
-            None
-            if config.arrow_compression == "none"
-            else config.arrow_compression
+            None if config.arrow_compression == "none" else config.arrow_compression
         ),
         user_cores=config.cores,
         network_retries=config.network_retries,

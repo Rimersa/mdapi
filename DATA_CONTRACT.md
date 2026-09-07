@@ -1,3 +1,5 @@
+> 0.5.0 兼容说明：现有 Parquet 与 catalog v2 无需改动。新增读取协议见 [RANGE_PROTOCOL.md](RANGE_PROTOCOL.md)。压缩元数据缓存位于行情目录之外。
+
 # 五分钟数据目录契约（catalog v2）
 
 完整字段说明和当前参考schema见

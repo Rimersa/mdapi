@@ -1,0 +1,98 @@
+{
+  "files_checked": 13,
+  "unchanged": true,
+  "gateway_user_has_write_access": false,
+  "files": [
+    {
+      "path": "objects/orders/trade_date=2026-08-27/version=750807317977f86b/_bucket_5m=915/00000000.parquet",
+      "size": 40884918,
+      "mtime_ns": 1787866276282057979,
+      "inode": 117716241,
+      "writable_by_gateway_user": false
+    },
+    {
+      "path": "objects/orders/trade_date=2026-08-27/version=750807317977f86b/_bucket_5m=920/00000000.parquet",
+      "size": 21745930,
+      "mtime_ns": 1787866276400059725,
+      "inode": 117716275,
+      "writable_by_gateway_user": false
+    },
+    {
+      "path": "objects/orders/trade_date=2026-08-27/version=750807317977f86b/_bucket_5m=930/00000000.parquet",
+      "size": 134423285,
+      "mtime_ns": 1787866048190684307,
+      "inode": 117716032,
+      "writable_by_gateway_user": false
+    },
+    {
+      "path": "objects/orders/trade_date=2026-08-27/version=750807317977f86b/_bucket_5m=930/00000001.parquet",
+      "size": 135519177,
+      "mtime_ns": 1787866216525174122,
+      "inode": 117716276,
+      "writable_by_gateway_user": false
+    },
+    {
+      "path": "objects/orders/trade_date=2026-08-27/version=750807317977f86b/_bucket_5m=930/00000002.parquet",
+      "size": 54245349,
+      "mtime_ns": 1787866276441060331,
+      "inode": 117716280,
+      "writable_by_gateway_user": false
+    },
+    {
+      "path": "objects/trades/trade_date=2026-08-27/version=631fe279ba9c574b/_bucket_5m=915/00000000.parquet",
+      "size": 1302013,
+      "mtime_ns": 1787866570616411442,
+      "inode": 117716406,
+      "writable_by_gateway_user": false
+    },
+    {
+      "path": "objects/trades/trade_date=2026-08-27/version=631fe279ba9c574b/_bucket_5m=925/00000000.parquet",
+      "size": 6917073,
+      "mtime_ns": 1787866570717412936,
+      "inode": 117716402,
+      "writable_by_gateway_user": false
+    },
+    {
+      "path": "objects/trades/trade_date=2026-08-27/version=631fe279ba9c574b/_bucket_5m=930/00000000.parquet",
+      "size": 135571674,
+      "mtime_ns": 1787866459415766687,
+      "inode": 117716304,
+      "writable_by_gateway_user": false
+    },
+    {
+      "path": "objects/trades/trade_date=2026-08-27/version=631fe279ba9c574b/_bucket_5m=930/00000001.parquet",
+      "size": 92383215,
+      "mtime_ns": 1787866570730413129,
+      "inode": 117716403,
+      "writable_by_gateway_user": false
+    },
+    {
+      "path": "objects/snapshots/trade_date=2026-08-27/version=1ade048b8e901862/_bucket_5m=915/00000000.parquet",
+      "size": 3609969,
+      "mtime_ns": 1787866973398310543,
+      "inode": 117716519,
+      "writable_by_gateway_user": false
+    },
+    {
+      "path": "objects/snapshots/trade_date=2026-08-27/version=1ade048b8e901862/_bucket_5m=920/00000000.parquet",
+      "size": 4086367,
+      "mtime_ns": 1787866973604313525,
+      "inode": 117716517,
+      "writable_by_gateway_user": false
+    },
+    {
+      "path": "objects/snapshots/trade_date=2026-08-27/version=1ade048b8e901862/_bucket_5m=925/00000000.parquet",
+      "size": 2041969,
+      "mtime_ns": 1787866973884317578,
+      "inode": 117716527,
+      "writable_by_gateway_user": false
+    },
+    {
+      "path": "objects/snapshots/trade_date=2026-08-27/version=1ade048b8e901862/_bucket_5m=930/00000000.parquet",
+      "size": 60196931,
+      "mtime_ns": 1787866974044319895,
+      "inode": 117716421,
+      "writable_by_gateway_user": false
+    }
+  ]
+}

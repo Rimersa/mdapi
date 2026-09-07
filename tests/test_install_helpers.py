@@ -66,6 +66,31 @@ def test_client_config_is_private_json(tmp_path: Path) -> None:
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
+def test_gateway_upgrade_preserves_operator_settings(tmp_path):
+    previous = tmp_path / "gateway.env"
+    previous.write_text(
+        "MDAPI_GATEWAY_HOST=127.0.0.1\nMDAPI_GATEWAY_PORT=19000\nMDAPI_MAX_STREAMS=3\n"
+    )
+    output = tmp_path / "new.env"
+    tool = PROJECT_ROOT / "scripts" / "write_gateway_config.py"
+    subprocess.run(
+        [
+            sys.executable,
+            str(tool),
+            str(output),
+            str(previous),
+            str(tmp_path / "data"),
+            str(tmp_path / "users.json"),
+            str(tmp_path / "cache" / "footers.sqlite3"),
+        ],
+        check=True,
+    )
+    result = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    assert result["MDAPI_GATEWAY_PORT"] == "19000"
+    assert result["MDAPI_MAX_STREAMS"] == "3"
+    assert result["MDAPI_DATA_ROOT"] == str(tmp_path / "data")
+
+
 def test_manage_users_add_rotate_and_remove_preserves_mode(tmp_path: Path) -> None:
     path = tmp_path / "users.json"
     path.write_text("{}\n", encoding="utf-8")

@@ -105,7 +105,9 @@ class DataRequest:
         object.__setattr__(self, "daily_start", daily_start)
         object.__setattr__(self, "daily_end", daily_end)
         if self.columns is not None:
-            if isinstance(self.columns, str) or any(not isinstance(c, str) or not c for c in self.columns):
+            if isinstance(self.columns, str) or any(
+                not isinstance(c, str) or not c for c in self.columns
+            ):
                 raise ValueError("columns 必须是字段名称数组")
             columns = tuple(dict.fromkeys(self.columns))
             if not columns:
@@ -114,11 +116,17 @@ class DataRequest:
         if self.symbols is not None:
             if isinstance(self.symbols, str):
                 raise ValueError("symbols 必须是股票代码数组")
-            if not self.symbols or any(not isinstance(s, str) or not s.strip() for s in self.symbols):
+            if not self.symbols or any(
+                not isinstance(s, str) or not s.strip() for s in self.symbols
+            ):
                 raise ValueError("symbols 必须是非空字符串数组；取全部股票时省略此参数")
-            object.__setattr__(self, "symbols", tuple(dict.fromkeys(s.strip() for s in self.symbols)))
+            object.__setattr__(
+                self, "symbols", tuple(dict.fromkeys(s.strip() for s in self.symbols))
+            )
         if self.read_strategy not in {"auto", "ranges", "sequential"}:
             raise ValueError("read_strategy 必须是 auto、ranges 或 sequential")
+        if self.mode == FetchMode.CACHE and self.read_strategy == "ranges":
+            raise ValueError("ranges 只适用于 direct；cache 模式缓存完整对象")
 
     @classmethod
     def from_values(
@@ -167,8 +175,20 @@ class DataRequest:
     def from_query(cls, query):
         """Normalize the same strict query contract for HTTP and native clients."""
         raw = dict(query)
-        allowed = {"dataset", "start", "end", "start_date", "end_date", "daily_start", "daily_end",
-                   "columns", "symbols", "mode", "update", "read_strategy"}
+        allowed = {
+            "dataset",
+            "start",
+            "end",
+            "start_date",
+            "end_date",
+            "daily_start",
+            "daily_end",
+            "columns",
+            "symbols",
+            "mode",
+            "update",
+            "read_strategy",
+        }
         if set(raw) - allowed:
             raise ValueError(f"不支持的请求参数: {sorted(set(raw) - allowed)}")
         if "dataset" not in raw:
@@ -177,10 +197,19 @@ class DataRequest:
         continuous = raw.get("start") is not None or raw.get("end") is not None
         daily = first is not None or last is not None
         if continuous == daily:
-            raise ValueError("必须二选一：start/end，或 start_date/end_date + 每日时间窗口")
+            raise ValueError(
+                "必须二选一：start/end，或 start_date/end_date + 每日时间窗口"
+            )
         if daily:
-            if first is None or last is None or not raw.get("daily_start") or not raw.get("daily_end"):
-                raise ValueError("日期区间模式需要 start_date/end_date 和 daily_start/daily_end")
+            if (
+                first is None
+                or last is None
+                or not raw.get("daily_start")
+                or not raw.get("daily_end")
+            ):
+                raise ValueError(
+                    "日期区间模式需要 start_date/end_date 和 daily_start/daily_end"
+                )
             first, last = dt.date.fromisoformat(first), dt.date.fromisoformat(last)
             if last < first:
                 raise ValueError("end_date 不能早于 start_date")
@@ -212,9 +241,7 @@ def detect_local_resources(cache_path: str) -> LocalResources:
         available_memory = int(memory.available)
         free_disk = int(psutil.disk_usage(cache_path).free)
     except Exception:
-        total_memory = int(
-            os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
-        )
+        total_memory = int(os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE"))
         available_memory = int(
             os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
         )

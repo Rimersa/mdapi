@@ -4,8 +4,9 @@ import io
 from email.message import Message
 
 import pyarrow as pa
+import pytest
 
-from market_data_api.sdk import MarketDataClient
+from market_data_api.sdk import MarketDataClient, MarketDataAPIError
 
 
 class _ArrowResponse(io.BytesIO):
@@ -33,3 +34,13 @@ def test_sdk_streams_batches_and_can_materialize(monkeypatch) -> None:
     batches = list(client.iter_batches({"dataset": "snapshots"}))
     assert pa.Table.from_batches(batches).equals(table)
     assert client.read_table({"dataset": "snapshots"}).equals(table)
+
+
+def test_sdk_rejects_old_proxy_ignoring_symbols(monkeypatch):
+    client = MarketDataClient()
+    response = _ArrowResponse(b"not read")
+    monkeypatch.setattr(client, "_request", lambda *_args, **_kwargs: response)
+    with pytest.raises(MarketDataAPIError) as caught:
+        client.read_table({"symbols": ["A"]})
+    assert caught.value.status == 409
+    assert response.closed

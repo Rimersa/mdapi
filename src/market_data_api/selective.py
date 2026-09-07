@@ -3,19 +3,27 @@
 from __future__ import annotations
 
 import base64
+import gc
 import bisect
 import io
 import json
 import threading
 from collections import OrderedDict
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
+from .range_gateway import decompress_footer
 
-from .client import _is_retryable_transfer_error, _iter_filtered_batches_from_parquet, _read_exact, _retry_wait, NetworkTransferError
+from .client import (
+    _is_retryable_transfer_error,
+    _iter_filtered_batches_from_parquet,
+    _retry_wait,
+    NetworkTransferError,
+)
 
 
 @dataclass(frozen=True)
 class ReadOptions:
     """HDD defaults; settings change transfer planning, never query results."""
+
     coalesce_gap_bytes: int = 512 * 1024
     seek_cost_bytes: int = 1024 * 1024
     sequential_threshold: float = 0.85
@@ -23,7 +31,12 @@ class ReadOptions:
     metadata_cache_bytes: int = 64 * 1024**2
 
     def __post_init__(self):
-        if min(self.coalesce_gap_bytes, self.seek_cost_bytes, self.metadata_cache_bytes) < 0:
+        if (
+            min(
+                self.coalesce_gap_bytes, self.seek_cost_bytes, self.metadata_cache_bytes
+            )
+            < 0
+        ):
             raise ValueError("读取参数字节数不能为负数")
         if self.bundle_bytes < 1 or not 0 < self.sequential_threshold <= 1:
             raise ValueError("bundle_bytes 必须为正；sequential_threshold 必须在 (0,1]")
@@ -50,13 +63,17 @@ class ReadStats:
     network_requests: int = 0
     retries: int = 0
     queue_ms: float = 0.0
+    versions: dict[str, list[str]] = field(default_factory=dict)
 
     def as_dict(self):
         return asdict(self)
 
 
 def object_ref(entry):
-    return {key: getattr(entry, key) for key in ("object_id", "dataset", "trade_date", "version")}
+    return {
+        key: getattr(entry, key)
+        for key in ("object_id", "dataset", "trade_date", "version")
+    }
 
 
 @dataclass(frozen=True)
@@ -65,8 +82,21 @@ class ParquetMetadata:
     arrow: object
 
 
+def parse_metadata(footer):
+    """Close the Python file wrapper immediately; returned metadata owns its contents."""
+    import pyarrow.parquet as pq
+
+    with io.BytesIO(b"PAR1" + footer) as source:
+        reader = pq.ParquetFile(source)
+        try:
+            return reader.metadata
+        finally:
+            reader.close()
+
+
 class MetadataCache:
-    """Shared LRU; charge parsed metadata conservatively as four times the footer."""
+    """Bounded raw-footer LRU; parse only the current window to bound Arrow allocations."""
+
     def __init__(self, capacity):
         self.capacity = capacity
         self.bytes = 0
@@ -79,27 +109,28 @@ class MetadataCache:
             item = self._items.get(key)
             if item is not None:
                 self._items.move_to_end(key)
-            return item
+        if item is not None:
+            return ParquetMetadata(item, parse_metadata(item))
+        return None
 
     def put(self, entry, item):
         key = (entry.object_id, entry.version, entry.bytes)
-        cost = len(item.footer) * 4
+        cost = len(item.footer)
         if cost > self.capacity:
             return
         with self._lock:
             previous = self._items.pop(key, None)
             if previous is not None:
-                self.bytes -= len(previous.footer) * 4
-            self._items[key] = item
+                self.bytes -= len(previous)
+            self._items[key] = item.footer
             self.bytes += cost
             while self.bytes > self.capacity:
                 _, old = self._items.popitem(last=False)
-                self.bytes -= len(old.footer) * 4
+                self.bytes -= len(old)
 
 
 def load_metadata(pool, entries, cache, stats, retries, backoff):
     """Fetch only missing footers in one authenticated, version-pinned request."""
-    import pyarrow.parquet as pq
     result = {e.object_id: cache.get(e) for e in entries}
     missing = [e for e in entries if result[e.object_id] is None]
     if not missing:
@@ -118,14 +149,24 @@ def load_metadata(pool, entries, cache, stats, retries, backoff):
                     connection.close()
                     raise
             by_id = {item["object_id"]: item for item in payload["objects"]}
-            if len(by_id) != len(missing) or set(by_id) != {e.object_id for e in missing}:
+            if len(by_id) != len(missing) or set(by_id) != {
+                e.object_id for e in missing
+            }:
                 raise ValueError("网关元数据对象集合不匹配")
             for entry in missing:
                 item = by_id[entry.object_id]
-                if item["version"] != entry.version or item["file_bytes"] != entry.bytes:
+                if (
+                    item["version"] != entry.version
+                    or item["file_bytes"] != entry.bytes
+                ):
                     raise ValueError("网关元数据版本或文件大小不匹配")
                 footer = base64.b64decode(item["footer"], validate=True)
-                metadata = pq.read_metadata(io.BytesIO(b"PAR1" + footer))
+                codec = payload.get("footer_codec")
+                if codec == "zlib":
+                    footer = decompress_footer(footer)
+                elif codec is not None:
+                    raise ValueError(f"未知元数据压缩格式: {codec}")
+                metadata = parse_metadata(footer)
                 if metadata.num_rows != entry.rows:
                     raise ValueError("Parquet footer 行数与 catalog 不一致")
                 parsed = ParquetMetadata(footer, metadata)
@@ -182,12 +223,21 @@ def plan_object(entry, metadata, request, options):
     symbols = sorted(request.symbols) if request.symbols is not None else None
     start, end = request.start.replace(tzinfo=None), request.end.replace(tzinfo=None)
     groups, chunks, max_decoded = [], [], 0
+    indexes = {}
+    if metadata.arrow.num_row_groups:
+        first_group = metadata.arrow.row_group(0)
+        indexes = {
+            first_group.column(j).path_in_schema: j
+            for j in range(first_group.num_columns)
+        }
+    wanted_indexes = [
+        j for name, j in indexes.items() if name.split(".", 1)[0] in wanted
+    ]
     for i in range(metadata.arrow.num_row_groups):
         group = metadata.arrow.row_group(i)
-        by_name = {group.column(j).path_in_schema: group.column(j) for j in range(group.num_columns)}
         keep = True
         for name in ("symbol", "event_time"):
-            col = by_name.get(name)
+            col = group.column(indexes[name]) if name in indexes else None
             st = col.statistics if col is not None else None
             if st is None or not st.has_min_max:
                 continue
@@ -207,10 +257,13 @@ def plan_object(entry, metadata, request, options):
             continue
         groups.append(i)
         decoded = 0
-        for name, col in by_name.items():
-            if name.split(".", 1)[0] not in wanted:
-                continue
-            offsets = [v for v in (col.dictionary_page_offset, col.data_page_offset) if v is not None and v >= 4]
+        for index in wanted_indexes:
+            col = group.column(index)
+            offsets = [
+                v
+                for v in (col.dictionary_page_offset, col.data_page_offset)
+                if v is not None and v >= 4
+            ]
             if not offsets or col.total_compressed_size <= 0:
                 raise ValueError("Parquet 列块偏移或大小非法")
             offset, length = min(offsets), col.total_compressed_size
@@ -221,15 +274,23 @@ def plan_object(entry, metadata, request, options):
         max_decoded = max(max_decoded, decoded)
     ranges = coalesce_ranges(chunks, options.coalesce_gap_bytes)
     cost = sum(n for _, n in ranges) + max(0, len(ranges) - 1) * options.seek_cost_bytes
-    sequential = bool(ranges) and (len(ranges) > 4096 or (
-        request.read_strategy == "auto" and cost >= entry.bytes * options.sequential_threshold))
+    sequential = bool(ranges) and (
+        len(ranges) > 4096
+        or (
+            request.read_strategy == "auto"
+            and cost >= entry.bytes * options.sequential_threshold
+        )
+    )
     if sequential:
         ranges = ((0, entry.bytes),)
-    return ObjectReadPlan(entry, metadata, tuple(groups), ranges, max_decoded, sequential)
+    return ObjectReadPlan(
+        entry, metadata, tuple(groups), ranges, max_decoded, sequential
+    )
 
 
 class SparseFile(io.RawIOBase):
     """Seekable view of fetched segments without allocating the full file size."""
+
     def __init__(self, size, segments):
         super().__init__()
         self.size = size
@@ -237,13 +298,20 @@ class SparseFile(io.RawIOBase):
         # Drop fully covered header/footer duplicates when the plan chose a whole file.
         self.segments = []
         for offset, raw in sorted(segments, key=lambda x: (x[0], -len(x[1]))):
-            if self.segments and offset + len(raw) <= self.segments[-1][0] + len(self.segments[-1][1]):
+            if self.segments and offset + len(raw) <= self.segments[-1][0] + len(
+                self.segments[-1][1]
+            ):
                 continue
             self.segments.append((offset, raw))
         self.starts = [offset for offset, _ in self.segments]
 
     def readable(self):
         return True
+
+    def close(self):
+        self.segments.clear()
+        self.starts.clear()
+        super().close()
 
     def seekable(self):
         return True
@@ -252,14 +320,24 @@ class SparseFile(io.RawIOBase):
         return self.position
 
     def seek(self, offset, whence=0):
-        position = offset if whence == 0 else self.position + offset if whence == 1 else self.size + offset
+        position = (
+            offset
+            if whence == 0
+            else self.position + offset
+            if whence == 1
+            else self.size + offset
+        )
         if position < 0:
             raise ValueError("negative seek")
         self.position = position
         return position
 
     def read(self, size=-1):
-        length = max(0, self.size - self.position) if size < 0 else min(size, max(0, self.size - self.position))
+        length = (
+            max(0, self.size - self.position)
+            if size < 0
+            else min(size, max(0, self.size - self.position))
+        )
         pieces = []
         while length:
             i = bisect.bisect_right(self.starts, self.position) - 1
@@ -270,7 +348,7 @@ class SparseFile(io.RawIOBase):
             count = min(length, len(raw) - local)
             if count <= 0:
                 raise OSError(f"读取器请求了未下载的字节: {self.position}")
-            pieces.append(raw[local:local + count])
+            pieces.append(raw[local : local + count])
             self.position += count
             length -= count
         return b"".join(pieces)
@@ -281,18 +359,27 @@ def _fetch_plans(pool, plans, stats, retries, backoff, memory_check):
     completed = []
     attempts = 0
     while len(completed) < len(plans):
-        remaining = plans[len(completed):]
-        body = json.dumps({"objects": [dict(object_ref(p.entry), ranges=p.ranges) for p in remaining]}).encode()
+        remaining = plans[len(completed) :]
+        body = json.dumps(
+            {"objects": [dict(object_ref(p.entry), ranges=p.ranges) for p in remaining]}
+        ).encode()
         before = len(completed)
         expected = iter(remaining)
+
         def consume(header, source):
             plan = next(expected)
-            if (header.get("object_id") != plan.entry.object_id or header.get("version") != plan.entry.version
-                    or header.get("file_bytes") != plan.entry.bytes
-                    or header.get("bytes") != plan.transfer_bytes
-                    or header.get("ranges") != [list(r) for r in plan.ranges]):
+            if (
+                header.get("object_id") != plan.entry.object_id
+                or header.get("version") != plan.entry.version
+                or header.get("file_bytes") != plan.entry.bytes
+                or header.get("bytes") != plan.transfer_bytes
+                or header.get("ranges") != [list(r) for r in plan.ranges]
+            ):
                 raise ValueError("范围响应与固定版本读取计划不一致")
-            segments = [(0, b"PAR1"), (plan.entry.bytes - len(plan.metadata.footer), plan.metadata.footer)]
+            segments = [
+                (0, b"PAR1"),
+                (plan.entry.bytes - len(plan.metadata.footer), plan.metadata.footer),
+            ]
             for offset, length in plan.ranges:
                 memory_check("range_receive")
                 chunks = []
@@ -304,6 +391,7 @@ def _fetch_plans(pool, plans, stats, retries, backoff, memory_check):
                     left -= len(block)
                 segments.append((offset, b"".join(chunks)))
             completed.append(SparseFile(plan.entry.bytes, segments))
+
         try:
             with pool.connection() as connection:
                 stats.network_requests += 1
@@ -321,24 +409,43 @@ def _fetch_plans(pool, plans, stats, retries, backoff, memory_check):
             if len(completed) == len(plans):
                 return completed
             if attempts >= retries:
-                raise NetworkTransferError(str(exc), completed_objects=len(completed),
-                    remaining_objects=len(plans) - len(completed), retries=retries) from exc
+                raise NetworkTransferError(
+                    str(exc),
+                    completed_objects=len(completed),
+                    remaining_objects=len(plans) - len(completed),
+                    retries=retries,
+                ) from exc
             attempts += 1
             stats.retries += 1
             _retry_wait(attempts, backoff)
 
 
-def iter_selective_batches(pool, request, entries, *, cache, options, stats,
-                           claim_memory, memory_check, batch_rows=131072,
-                           network_retries=3, network_retry_backoff=0.25, object_request_size=12):
+def iter_selective_batches(
+    pool,
+    request,
+    entries,
+    *,
+    cache,
+    options,
+    stats,
+    claim_memory,
+    memory_check,
+    batch_rows=131072,
+    network_retries=3,
+    network_retry_backoff=0.25,
+    object_request_size=12,
+):
     """Plan bounded windows, download coalesced ranges, and return exact Arrow rows."""
     import pyarrow as pa
-    width = min(12, max(1, object_request_size))
-    for offset in range(0, len(entries), width):
-        window = entries[offset:offset + width]
+
+    def window_batches(window):
         memory_check("metadata_start")
-        metadata = load_metadata(pool, window, cache, stats, network_retries, network_retry_backoff)
-        plans = [plan_object(e, metadata[e.object_id], request, options) for e in window]
+        metadata = load_metadata(
+            pool, window, cache, stats, network_retries, network_retry_backoff
+        )
+        plans = [
+            plan_object(e, metadata[e.object_id], request, options) for e in window
+        ]
         active = []
         for plan in plans:
             stats.planned_bytes += plan.transfer_bytes
@@ -348,26 +455,59 @@ def iter_selective_batches(pool, request, entries, *, cache, options, stats,
                 stats.skipped_objects += 1
                 schema = plan.metadata.arrow.schema.to_arrow_schema()
                 if request.columns is not None:
-                    schema = pa.schema([schema.field(name) for name in request.columns], metadata=schema.metadata)
-                yield pa.RecordBatch.from_arrays([pa.array([], type=f.type) for f in schema], schema=schema)
+                    schema = pa.schema(
+                        [schema.field(name) for name in request.columns],
+                        metadata=schema.metadata,
+                    )
+                yield pa.RecordBatch.from_arrays(
+                    [pa.array([], type=f.type) for f in schema], schema=schema
+                )
             else:
                 active.append(plan)
         first = 0
         while first < len(active):
             last = first + 1
             total = active[first].transfer_bytes
-            while last < len(active) and total + active[last].transfer_bytes <= options.bundle_bytes:
+            while (
+                last < len(active)
+                and total + active[last].transfer_bytes <= options.bundle_bytes
+            ):
                 total += active[last].transfer_bytes
                 last += 1
             selected = active[first:last]
-            working = 2 * total + 4 * max(p.max_row_group_bytes for p in selected) + 32 * 1024**2
+            working = (
+                2 * total
+                + 4 * max(p.max_row_group_bytes for p in selected)
+                + 32 * 1024**2
+            )
             with claim_memory(working):
-                buffers = _fetch_plans(pool, selected, stats, network_retries, network_retry_backoff, memory_check)
+                buffers = _fetch_plans(
+                    pool,
+                    selected,
+                    stats,
+                    network_retries,
+                    network_retry_backoff,
+                    memory_check,
+                )
                 for plan, buffer in zip(selected, buffers):
                     try:
-                        yield from _iter_filtered_batches_from_parquet(buffer, request,
-                            batch_rows=batch_rows, memory_check=memory_check,
-                            metadata=plan.metadata.arrow, row_groups=list(plan.row_groups))
+                        yield from _iter_filtered_batches_from_parquet(
+                            buffer,
+                            request,
+                            batch_rows=batch_rows,
+                            memory_check=memory_check,
+                            metadata=plan.metadata.arrow,
+                            row_groups=list(plan.row_groups),
+                        )
                     finally:
                         buffer.close()
             first = last
+
+    width = min(12, max(1, object_request_size))
+    for offset in range(0, len(entries), width):
+        try:
+            yield from window_batches(entries[offset : offset + width])
+        finally:
+            # Arrow metadata can own large C++ allocations through tiny Python cycles.
+            # Collect only young temporary wrappers after each bounded window.
+            gc.collect(0)

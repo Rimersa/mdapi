@@ -2,10 +2,15 @@
 set -Eeuo pipefail
 
 CLIENT_PACKAGE_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+CLIENT_NATIVE=0
+if [[ "${1:-}" == "--native" ]]; then
+  CLIENT_NATIVE=1
+  shift
+fi
 CLIENT_GATEWAY_HOST="${1:-10.10.10.87}"
 CLIENT_GATEWAY_TOKEN="${2:-}"
 if [[ $# -gt 2 ]]; then
-  echo "用法: ./install-client.sh [服务器地址] [令牌]" >&2
+  echo "用法: ./install-client.sh [--native] [服务器地址] [令牌]" >&2
   exit 2
 fi
 if [[ -z "${CLIENT_GATEWAY_TOKEN}" ]]; then
@@ -46,6 +51,13 @@ if [[ ! -f "${CLIENT_WHEEL}" ]]; then
   exit 2
 fi
 mkdir -p "${CLIENT_INSTALL_ROOT}" "${CLIENT_CONFIG_ROOT}" "${CLIENT_BIN_PARENT}"
+if [[ ${CLIENT_NATIVE} -eq 1 ]]; then
+  "${CLIENT_PYTHON}" -m pip install --upgrade "${CLIENT_WHEEL}[client]"
+  "${CLIENT_PYTHON}" "${CLIENT_PACKAGE_ROOT}/scripts/write_client_config.py" \
+    "${CLIENT_CONFIG}" "${CLIENT_GATEWAY_HOST}" "${CLIENT_GATEWAY_TOKEN}"
+  echo "原生客户端已安装到当前 Python 环境。使用 MarketDataClient.connect() 即可读取。"
+  exit 0
+fi
 if ! "${CLIENT_PYTHON}" -m venv "${CLIENT_VENV}"; then
   echo "无法创建Python虚拟环境；Ubuntu可先安装 python3-venv。" >&2
   exit 1

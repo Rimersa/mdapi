@@ -1,191 +1,95 @@
-# Market Data API 0.4.1 部署说明
+# 0.5.0 部署和运维
 
-普通安装请直接使用 [`QUICKSTART.md`](QUICKSTART.md) 的两条命令。本文件解释一键
-安装背后的目录、配置、升级和排障方式。
+## 输入与运行要求
 
-## 组件边界
+网关运行在 Linux，要求 Python 3.10 或更新版本，只使用标准库。输入是已经发布的五分钟 Parquet 与 catalog v2；网关不会改写、重新切片、清洗或删除行情文件。
 
-- 87服务器：`mdapi-gateway.pyz`，只依赖系统Python标准库；
-- 用户机器：本机FastAPI、PyArrow处理流水线和可选增量缓存；
-- 上游程序：按 [`SERVER_DATA_FORMAT.md`](SERVER_DATA_FORMAT.md) 生成五分钟成品数据；
+运行账号需要读取 catalog/current/version JSON、进入对象目录并读取 Parquet 的权限。不要让迁移或维护工具改变这些读取权限。
 
-数据请求不使用SSH。SSH只用于管理员复制发布包、升级和排障。
+## 安装和升级
 
-## 一、87服务器
-
-### 推荐安装
-
-系统服务模式：
+在发行包解压目录中：
 
 ```bash
-sudo ./install-server.sh /正式五分钟数据根目录
+./install-server.sh /data/market_data_5m
 ```
 
-没有sudo时可使用用户服务模式：
+不加 sudo 延续用户服务；加 sudo 创建系统服务。已有部署升级时保持同一种服务模式，避免创建两套监听相同端口的服务。
+
+安装器保留已有用户令牌、监听地址、端口、并发设置，更新程序和服务配置并重启。数据根参数明确指定新服务读取位置。安装器不改动行情目录内容。
+
+升级前建议保存程序和配置以便回滚。回滚只替换程序与配置并重启，数据格式无需转换。
+
+| 内容 | 用户服务 | 系统服务 |
+|---|---|---|
+| 程序 | `~/.local/share/market-data-api-server/mdapi-gateway.pyz` | `/opt/market-data-api/mdapi-gateway.pyz` |
+| 配置 | `~/.config/market-data-api-server/gateway.env` | `/etc/market-data-api/gateway.env` |
+| 用户 | 同配置目录的 users.json | 同配置目录的 users.json |
+| 元数据缓存 | `~/.cache/market-data-api-server/footers.sqlite3` | `/var/cache/market-data-api/footers.sqlite3` |
+
+用户服务控制：
 
 ```bash
-./install-server.sh /正式五分钟数据根目录
+systemctl --user status market-data-gateway
+systemctl --user restart market-data-gateway
+journalctl --user -u market-data-gateway -n 100
 ```
 
-用户服务模式安装到`~/.local/share/market-data-api-server`和
-`~/.config/systemd/user`。管理员执行`sudo loginctl enable-linger quant`后，可保证无人
-登录和重启后仍自动运行。
+系统服务则省略 `--user`，由管理员操作。
 
-安装位置：
-
-```text
-/opt/market-data-api/mdapi-gateway.pyz
-/etc/market-data-api/gateway.env
-/etc/market-data-api/users.json
-/etc/systemd/system/market-data-gateway.service
-```
-
-用户服务模式的对应位置为：
-
-```text
-~/.local/share/market-data-api-server/mdapi-gateway.pyz
-~/.config/market-data-api-server/gateway.env
-~/.config/market-data-api-server/users.json
-~/.config/systemd/user/market-data-gateway.service
-~/.local/bin/mdapi-user
-```
-
-脚本要求数据目录已经存在并包含`catalog.json`。它只检查该目录，不会创建、切片、
-覆盖或删除其中的数据。
-
-正式目录应使用分片catalog v2。旧单文件v1可以先只打印迁移计划：
+用户服务要在无人登录时常驻，需由管理员执行一次：
 
 ```bash
-python3 tools/migrate_catalog_v2.py --root /五分钟数据根目录
+sudo loginctl enable-linger quant
 ```
 
-确认对象数和分片数后执行：
-
-```bash
-python3 tools/migrate_catalog_v2.py \
-  --root /五分钟数据根目录 \
-  --execute
-```
-
-该工具不读取或修改Parquet，只新增版本分片、当前指针和固定大小根索引。默认不留下旧
-格式副本；确需额外归档时增加`--keep-backup`。0.4.1网关仍可临时读取旧单文件catalog，
-但它会随历史线性膨胀，不应继续用于长期生产。
-
-状态和日志：
-
-```bash
-systemctl status market-data-gateway
-journalctl -u market-data-gateway -f
-curl http://10.10.10.87:18787/health
-```
-
-用户服务模式把前两条改为`systemctl --user status ...`和
-`journalctl --user -u ...`。
-
-用户令牌保存在`/etc/market-data-api/users.json`。重复运行安装命令时，已有用户令牌
-保持不变，只给新用户名生成令牌。
-
-零用户时`users.json`为`{}`，健康接口正常，但所有数据接口返回401。用户管理采用热
-加载，不需要重启网关：
+## 用户和认证
 
 ```bash
 mdapi-user add alice
 mdapi-user list
-mdapi-user show alice
 mdapi-user rotate alice
 mdapi-user remove alice
 ```
 
-系统服务模式下通常使用`sudo mdapi-user ...`；用户服务模式直接运行。令牌文件通过
-临时文件、`fsync`和原子重命名更新，已有请求不受影响。
-
-### 每日数据更新
-
-上游程序依次原子发布新Parquet、新的不可变version分片、当天`current.json`，最后只
-更新约400字节的根`catalog.json`。网关按需重载涉及日期，无需重启。旧请求继续读取旧
-version，新请求立即读取新version。具体字段和顺序见`SERVER_DATA_FORMAT.md`。
-
-### 升级
-
-使用新发布包重复执行原安装命令即可。安装脚本替换网关程序和服务模板，但保留已有
-用户令牌：
+用户令牌热更新，不需要重启；每位用户应有独立令牌。零用户时数据接口锁定。健康接口不要求令牌。
 
 ```bash
-sudo ./install-server.sh /正式五分钟数据根目录
+curl http://10.10.10.87:18787/health
 ```
 
-## 二、用户机器
+0.5 返回 version 和 `parquet_footers_v1`、`range_bundles_v1`、`http_range_v1` 能力标志。`metadata_index_enabled` 表示持久元数据缓存启用。
 
-### 推荐安装
+## 元数据缓存
+
+`MDAPI_METADATA_INDEX` 或 `--metadata-index` 可指定压缩 footer SQLite 缓存，路径必须位于行情数据根目录之外。安装器默认启用；手动启动且不指定时只有内存缓存。
+
+首次查询新对象时惰性填充，后续同版本复用。按对象版本、文件 inode、mtime 和大小识别变化。数据库损坏的条目会回退到源 footer；该缓存可以删除重建，不是数据来源。停止网关后可删除整个缓存数据库及同名 WAL/SHM，再启动重建。
+
+系统服务启用 ProtectSystem=strict，仅默认缓存目录允许写入。若自定义缓存路径，需要同时给该目录正确的账号权限及 systemd ReadWritePaths。
+
+可以从安装了客户端的机器预热某个明确日期区间：
 
 ```bash
-./install-client.sh 10.10.10.87
+python tools/warm_metadata.py \
+  --config ~/.config/market-data-api/client.json \
+  --start-date 2026-09-01 --end-date 2026-09-04
 ```
 
-令牌不写入命令历史；安装程序会隐藏输入。默认位置：
+它只请求 footer，不下载业务列，也不改写行情文件。可在常用数据发布后预热；初次索引大量冷历史文件仍需要付出寻道成本。
 
-```text
-~/.local/share/market-data-api/venv
-~/.config/market-data-api/client.json
-~/.local/bin/mdapi-local
-~/.cache/market-data-api
-```
+## 并发和客户端
 
-`client.json`权限为`0600`。客户端没有systemd服务，也不会开机启动。
+默认 `MDAPI_MAX_STREAMS=2`，按个人令牌公平轮转；队列有上限。客户端会将大查询分成有限字节量/对象数量的小段。单个大对象仍可能需要较长读取时间，不保证所有历史随机读都有固定延迟。
 
-开始工作前运行：
+用户自己的 Python 环境推荐安装 `[client]` 并使用 `MarketDataClient.connect()`。需要共享本机 HTTP 服务时安装 `[api]` 并运行 `mdapi-local`。本机服务监听默认 127.0.0.1:18788，完整用户用法见 USER_GUIDE.md。
+
+## 验证与发布
 
 ```bash
-~/.local/bin/mdapi-local
+python -m pip install -e '.[test]'
+python -m pytest -q
+python tools/build_release.py
 ```
 
-保持该终端开启。用户研究代码访问`http://127.0.0.1:18788`；工作完成后按`Ctrl+C`。
-
-如需改变本机端口或缓存位置，编辑`client.json`。命令行参数优先于配置文件，例如：
-
-```bash
-~/.local/bin/mdapi-local --port 18888 --cores 1
-```
-
-默认网络恢复参数为：
-
-```json
-{
-  "network_retries": 3,
-  "network_retry_backoff": 0.25,
-  "object_request_size": 12
-}
-```
-
-本机API把长请求拆成小段，通过同一持久HTTP连接读取。断线时重新建TCP连接并从未完成
-的五分钟对象继续，不涉及SSH。cache会保留已经原子提交的完整桶，下一次请求也只补
-缺失桶。
-
-### SDK
-
-本地API可以从任何语言使用。Python研究环境可额外安装`client`依赖：
-
-```bash
-python -m pip install '/发布包目录/wheels/market_data_api-0.4.1-py3-none-any.whl[client]'
-```
-
-建议用`MarketDataClient.iter_batches()`逐批消费。`read_table()`会把完整结果物化到用户
-进程内存，是否保留或落盘由用户自行决定。
-
-完整示例、参数、错误码和排障见[`USER_GUIDE.md`](USER_GUIDE.md)。
-
-## 三、网络与安全
-
-- 87网关只绑定内网地址，不应暴露到公网；
-- 防火墙只允许授权用户机器访问TCP 18787；
-- 每位用户使用独立令牌，不能共享；
-- 不可信网络应使用VPN或TLS反向代理；
-- 本机FastAPI固定默认绑定`127.0.0.1`。
-
-## 四、依赖说明
-
-87单文件网关不需要pip、venv、PyArrow、FastAPI、DuckDB或Polars。
-
-用户安装程序需要Python 3.10或更高版本，并通过用户配置的pip源安装PyArrow、FastAPI、
-Uvicorn和psutil。如果用户机器不能访问公共或内部pip源，需要管理员另行提供与该用户
-Python版本和操作系统匹配的依赖wheelhouse。
+发行包包含 wheel、单文件网关、安装脚本、SHA256SUMS 及文档。`tools/bench_selective.py` 可在开发源码目录进行按需读取与四用户验证；生产数据只读，临时测试账号应放在独立配置中。

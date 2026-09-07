@@ -13,6 +13,7 @@ dependencies = []
 [project.optional-dependencies]
 client = [
   "pyarrow>=15",
+  "psutil>=5.9",
 ]
 api = [
   "pyarrow>=15",

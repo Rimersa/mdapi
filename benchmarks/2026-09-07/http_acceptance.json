@@ -1,0 +1,12 @@
+{
+  "version": "0.5.0",
+  "rows": 100,
+  "columns": [
+    "symbol",
+    "event_time",
+    "last_px_i32",
+    "volume_i64"
+  ],
+  "seconds": 0.5784411835484207,
+  "empty_stock_rows": 0
+}

@@ -1,0 +1,102 @@
+[
+  {
+    "iteration": 0,
+    "seconds": 3.318156225141138,
+    "rows": 23806,
+    "rss": 215375872,
+    "arrow_allocated": 0,
+    "stats": {
+      "source_bytes": 8795687241,
+      "metadata_bytes": 17628008,
+      "transfer_bytes": 3347790,
+      "planned_bytes": 3347790,
+      "range_count": 245,
+      "skipped_objects": 81,
+      "sequential_objects": 0,
+      "returned_rows": 23806,
+      "network_requests": 54,
+      "retries": 0,
+      "queue_ms": 0.7500000000000002
+    }
+  },
+  {
+    "iteration": 1,
+    "seconds": 1.8273353786207736,
+    "rows": 23806,
+    "rss": 218050560,
+    "arrow_allocated": 0,
+    "stats": {
+      "source_bytes": 8795687241,
+      "metadata_bytes": 0,
+      "transfer_bytes": 3347790,
+      "planned_bytes": 3347790,
+      "range_count": 245,
+      "skipped_objects": 81,
+      "sequential_objects": 0,
+      "returned_rows": 23806,
+      "network_requests": 26,
+      "retries": 0,
+      "queue_ms": 0.7060000000000003
+    }
+  },
+  {
+    "iteration": 2,
+    "seconds": 1.8219750369898975,
+    "rows": 23806,
+    "rss": 219201536,
+    "arrow_allocated": 0,
+    "stats": {
+      "source_bytes": 8795687241,
+      "metadata_bytes": 0,
+      "transfer_bytes": 3347790,
+      "planned_bytes": 3347790,
+      "range_count": 245,
+      "skipped_objects": 81,
+      "sequential_objects": 0,
+      "returned_rows": 23806,
+      "network_requests": 26,
+      "retries": 0,
+      "queue_ms": 0.8050000000000004
+    }
+  },
+  {
+    "iteration": 3,
+    "seconds": 1.5794830089434981,
+    "rows": 23806,
+    "rss": 222666752,
+    "arrow_allocated": 0,
+    "stats": {
+      "source_bytes": 8795687241,
+      "metadata_bytes": 0,
+      "transfer_bytes": 3347790,
+      "planned_bytes": 3347790,
+      "range_count": 245,
+      "skipped_objects": 81,
+      "sequential_objects": 0,
+      "returned_rows": 23806,
+      "network_requests": 26,
+      "retries": 0,
+      "queue_ms": 0.8180000000000005
+    }
+  },
+  {
+    "iteration": 4,
+    "seconds": 1.6241038530133665,
+    "rows": 23806,
+    "rss": 222900224,
+    "arrow_allocated": 0,
+    "stats": {
+      "source_bytes": 8795687241,
+      "metadata_bytes": 0,
+      "transfer_bytes": 3347790,
+      "planned_bytes": 3347790,
+      "range_count": 245,
+      "skipped_objects": 81,
+      "sequential_objects": 0,
+      "returned_rows": 23806,
+      "network_requests": 26,
+      "retries": 0,
+      "queue_ms": 0.8930000000000002
+    }
+  }
+]

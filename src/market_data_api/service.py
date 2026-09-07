@@ -39,6 +39,13 @@ class NoData(RuntimeError):
     pass
 
 
+def _version_map(entries):
+    grouped = {}
+    for entry in entries:
+        grouped.setdefault(entry.bucket_start[:10], set()).add(entry.version)
+    return {day: sorted(values) for day, values in sorted(grouped.items())}
+
+
 class LocalMemoryExhausted(RuntimeError):
     def __init__(
         self,
@@ -93,9 +100,11 @@ class Preflight:
         return {
             "objects": len(self.selection.entries),
             "rows": self.selection.rows,
+            "rows_estimate_kind": "candidate_rows_upper_bound",
             "source_bytes": self.selection.source_bytes,
             "uncompressed_bytes": self.selection.uncompressed_bytes,
             "estimated_arrow_memory": self.estimated_arrow_memory,
+            "estimated_arrow_memory_kind": "unfiltered_candidate_upper_bound",
             "estimated_working_memory": self.estimated_working_memory,
             "working_memory_limit": self.working_memory_limit,
             "memory_reserve": self.memory_reserve,
@@ -107,8 +116,15 @@ class Preflight:
             "recommended_workers": self.recommended_workers,
             "catalog_generated_at": self.selection.catalog_generated_at,
             "read_path": "adaptive_ranges" if self.selective else "whole_objects",
-            "working_memory_estimate_kind": "per_bundle_runtime_checked" if self.selective else "largest_bucket",
-            "estimated_transfer_bytes": None if self.selective else self.missing_cache_bytes if self.cache_plan is not None else self.selection.source_bytes,
+            "symbols_supported": True,
+            "working_memory_estimate_kind": "per_bundle_runtime_checked"
+            if self.selective
+            else "largest_bucket",
+            "estimated_transfer_bytes": None
+            if self.selective
+            else self.missing_cache_bytes
+            if self.cache_plan is not None
+            else self.selection.source_bytes,
         }
 
 
@@ -122,9 +138,7 @@ def _estimated_arrow_memory(selection: Selection, dataset: str) -> int:
 def _bucket_working_bytes(entries: list[ObjectEntry], dataset: str) -> int:
     grouped: dict[str, int] = {}
     for entry in entries:
-        grouped[entry.bucket_start] = (
-            grouped.get(entry.bucket_start, 0) + entry.bytes
-        )
+        grouped[entry.bucket_start] = grouped.get(entry.bucket_start, 0) + entry.bytes
     largest = max(grouped.values(), default=0) * ARROW_MEMORY_FACTOR[dataset]
     return largest * 2 + 128 * 1024**2
 
@@ -185,7 +199,9 @@ class WeightedMemoryGate:
             raise TimeoutError("等待本机读取槽位超时")
         try:
             with self._condition:
-                if not self._condition.wait_for(lambda: self._available >= weight, timeout=300):
+                if not self._condition.wait_for(
+                    lambda: self._available >= weight, timeout=300
+                ):
                     raise TimeoutError("等待本机读取内存额度超时")
                 self._available -= weight
             try:
@@ -212,9 +228,7 @@ class DataService:
         if not 0 < self.limits.max_memory_fraction <= 1:
             raise ValueError("max_memory_fraction 必须在 (0, 1] 范围内")
         if not 0 <= self.limits.runtime_memory_reserve_fraction < 1:
-            raise ValueError(
-                "runtime_memory_reserve_fraction 必须在 [0, 1) 范围内"
-            )
+            raise ValueError("runtime_memory_reserve_fraction 必须在 [0, 1) 范围内")
         if self.limits.runtime_memory_reserve_min < 0:
             raise ValueError("runtime_memory_reserve_min 不能为负数")
         if self.limits.max_response_uncompressed is not None:
@@ -256,7 +270,9 @@ class DataService:
             connections=remote_connections,
         )
         self.cache = LocalCache(cache_root)
-        self.metadata_cache = MetadataCache(self.limits.read_options.metadata_cache_bytes)
+        self.metadata_cache = MetadataCache(
+            self.limits.read_options.metadata_cache_bytes
+        )
         self._cache_fill_lock = threading.Lock()
         self.resources = resources
         self.workers = local_workers
@@ -268,9 +284,7 @@ class DataService:
 
     def _memory_monitor(self, reserve: int) -> RuntimeMemoryMonitor:
         return RuntimeMemoryMonitor(
-            lambda: detect_local_resources(
-                str(self.cache.root)
-            ).available_memory,
+            lambda: detect_local_resources(str(self.cache.root)).available_memory,
             reserve=reserve,
             check_interval=self.limits.memory_check_interval,
         )
@@ -295,14 +309,27 @@ class DataService:
             request.dataset,
         )
         working = _bucket_working_bytes(selection.entries, request.dataset)
-        capable = "range_bundles_v1" in selection.capabilities and "parquet_footers_v1" in selection.capabilities
+        capable = (
+            "range_bundles_v1" in selection.capabilities
+            and "parquet_footers_v1" in selection.capabilities
+        )
         if request.read_strategy == "ranges" and not capable:
             raise ValueError("ranges 读取需要 0.5 或更新的服务器网关")
-        selective = (request.mode == FetchMode.DIRECT and capable and request.read_strategy != "sequential"
-                     and (request.symbols is not None or request.columns is not None or request.read_strategy == "ranges"))
+        selective = (
+            request.mode == FetchMode.DIRECT
+            and capable
+            and request.read_strategy != "sequential"
+            and (
+                request.symbols is not None
+                or request.columns is not None
+                or request.read_strategy == "ranges"
+            )
+        )
         if selective:
             # Each actual bundle is separately estimated and admitted before allocating data buffers.
-            working = min(working, 64 * 1024**2 + 2 * self.limits.read_options.bundle_bytes)
+            working = min(
+                working, 64 * 1024**2 + 2 * self.limits.read_options.bundle_bytes
+            )
         cache_plan = (
             self.cache.plan(request, selection.entries)
             if request.mode == FetchMode.CACHE
@@ -339,9 +366,7 @@ class DataService:
                 estimates,
             )
         if request.mode == FetchMode.CACHE:
-            required_disk = int(
-                missing_cache_bytes * self.limits.cache_disk_headroom
-            )
+            required_disk = int(missing_cache_bytes * self.limits.cache_disk_headroom)
             if required_disk > resources.free_disk:
                 raise RequestRejected(
                     "cache_disk_insufficient",
@@ -372,7 +397,10 @@ class DataService:
             local_cpus=resources.cpus,
             recommended_workers=recommended,
             selective=selective,
-            stats=ReadStats(source_bytes=selection.source_bytes),
+            stats=ReadStats(
+                source_bytes=selection.source_bytes,
+                versions=_version_map(selection.entries),
+            ),
         )
 
     @contextlib.contextmanager
@@ -380,10 +408,15 @@ class DataService:
         resources = detect_local_resources(str(self.cache.root))
         limit = _working_memory_limit(resources, self.limits)
         if requested > limit:
-            raise RequestRejected("working_memory_too_large", "选中数据块的工作内存超过当前安全额度",
-                                  {"estimated_working_memory": requested, "working_memory_limit": limit})
+            raise RequestRejected(
+                "working_memory_too_large",
+                "选中数据块的工作内存超过当前安全额度",
+                {"estimated_working_memory": requested, "working_memory_limit": limit},
+            )
         with self.memory_gate.acquire(requested):
-            self._memory_monitor(_memory_reserve(resources, self.limits)).check("range_start", force=True)
+            self._memory_monitor(_memory_reserve(resources, self.limits)).check(
+                "range_start", force=True
+            )
             yield
 
     @staticmethod
@@ -405,14 +438,23 @@ class DataService:
         plan = preflight or self.preflight(request)
         monitor = self._memory_monitor(plan.memory_reserve)
         if plan.selective:
-            batches = iter_selective_batches(self.pool, request, plan.selection.entries,
-                cache=self.metadata_cache, options=self.limits.read_options, stats=plan.stats,
-                claim_memory=self._claim_scan_memory, memory_check=monitor.check,
-                batch_rows=self.limits.batch_rows, network_retries=self.limits.network_retries,
+            batches = iter_selective_batches(
+                self.pool,
+                request,
+                plan.selection.entries,
+                cache=self.metadata_cache,
+                options=self.limits.read_options,
+                stats=plan.stats,
+                claim_memory=self._claim_scan_memory,
+                memory_check=monitor.check,
+                batch_rows=self.limits.batch_rows,
+                network_retries=self.limits.network_retries,
                 network_retry_backoff=self.limits.network_retry_backoff,
-                object_request_size=self.limits.object_request_size)
+                object_request_size=self.limits.object_request_size,
+            )
             return plan, self._count_batches(batches, plan.stats)
         if request.mode == FetchMode.DIRECT:
+
             def direct_iterator():
                 with self.memory_gate.acquire(plan.estimated_working_memory):
                     with self.pool.connection() as connection:
@@ -424,9 +466,7 @@ class DataService:
                             batch_rows=self.limits.batch_rows,
                             memory_check=monitor.check,
                             network_retries=self.limits.network_retries,
-                            network_retry_backoff=(
-                                self.limits.network_retry_backoff
-                            ),
+                            network_retry_backoff=(self.limits.network_retry_backoff),
                             object_request_size=self.limits.object_request_size,
                             stats=plan.stats,
                         )
@@ -441,16 +481,24 @@ class DataService:
                 with self.memory_gate.acquire(plan.estimated_working_memory):
                     monitor.check("cache_fill_start", force=True)
                     with self.pool.connection() as connection:
-                        fetch_cache_objects(connection, self.cache, current_cache_plan.remote_objects,
+                        fetch_cache_objects(
+                            connection,
+                            self.cache,
+                            current_cache_plan.remote_objects,
                             network_retries=self.limits.network_retries,
                             network_retry_backoff=self.limits.network_retry_backoff,
-                            object_request_size=self.limits.object_request_size)
+                            object_request_size=self.limits.object_request_size,
+                            stats=plan.stats,
+                        )
             expected = {entry.bucket_start for entry in plan.selection.entries}
-            cached = [entry for entry in self.cache.selected(request) if entry.bucket_start in expected]
-        expected_buckets = {
-            entry.bucket_start for entry in plan.selection.entries
-        }
+            cached = [
+                entry
+                for entry in self.cache.selected(request)
+                if entry.bucket_start in expected
+            ]
+        expected_buckets = {entry.bucket_start for entry in plan.selection.entries}
         cached_buckets = {entry.bucket_start for entry in cached}
+        plan.stats.versions = _version_map(cached)
         if cached_buckets != expected_buckets:
             missing = sorted(expected_buckets - cached_buckets)
             raise RuntimeError(f"缓存发布后仍缺少桶: {missing}")
@@ -515,9 +563,7 @@ def _arrow_ipc_pipe(
                 errors.append(exc)
             elif isinstance(exc, memory_error_types):
                 errors.append(
-                    LocalMemoryExhausted(
-                        "本机在Arrow处理过程中内存不足，数据流已终止"
-                    )
+                    LocalMemoryExhausted("本机在Arrow处理过程中内存不足，数据流已终止")
                 )
             else:
                 errors.append(exc)

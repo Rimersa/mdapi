@@ -21,12 +21,15 @@ DOCUMENTS = (
     "DATA_CONTRACT.md",
     "BENCHMARK.md",
     "RELEASE_NOTES.md",
+    "RANGE_PROTOCOL.md",
+    "BENCHMARK_0_4.md",
 )
-PACKAGE_DIRECTORIES = ("deploy", "examples", "scripts")
+PACKAGE_DIRECTORIES = ("deploy", "examples", "scripts", "benchmarks")
 ADMIN_TOOLS = (
     "migrate_catalog_v2.py",
     "summarize_catalog.py",
     "prewarm.py",
+    "warm_metadata.py",
 )
 
 

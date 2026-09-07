@@ -1,273 +1,129 @@
-# Market Data API 用户使用手册
+# Market Data API 0.5.0 用户指南
 
-本文面向取数用户。用户只连接自己机器上的本地API，不使用SSH，也不需要知道87上的
-文件路径。
+## 连接与返回格式
 
-## 1. 使用前需要什么
+Python 推荐使用 `MarketDataClient.connect()`，读取本机已有配置，也可显式提供 `gateway_host`、`gateway_port`、`gateway_token`、`config`、`cache_root`。显式连接其他服务器时，不会把原配置的令牌自动发送到不同地址。
 
-- Linux机器和Python 3.10或更高版本；
-- 能访问`10.10.10.87:18787`；
-- 管理员分配的个人令牌；
-- `market-data-api-0.4.1`发布包。
-
-每个用户必须使用自己的令牌。服务器零用户时处于锁定状态；管理员创建用户并交付令牌
-后才能取数。
-
-## 2. 一次性安装
-
-```bash
-tar -xzf market-data-api-0.4.1-easy-install.tar.gz
-cd market-data-api-0.4.1
-./install-client.sh 10.10.10.87
-```
-
-安装程序会隐藏令牌输入，并自动完成：
-
-- 创建隔离Python环境；
-- 安装本机FastAPI、PyArrow及资源检测依赖；
-- 把令牌写入权限为`0600`的JSON配置；
-- 生成`~/.local/bin/mdapi-local`。
-
-它不会安装系统服务，也不会开机启动。
-
-## 3. 每次使用时启动和停止
-
-打开一个终端运行：
-
-```bash
-~/.local/bin/mdapi-local
-```
-
-看到以下信息即启动成功：
-
-```text
-Uvicorn running on http://127.0.0.1:18788
-```
-
-保持这个终端运行，研究程序可以循环请求任意日期。循环期间会复用HTTP连接，不会建立
-SSH，也不会在87上反复启动进程。
-
-工作完成后在该终端按`Ctrl+C`，本机API即退出并释放资源。
-
-健康检查：
-
-```bash
-curl http://127.0.0.1:18788/health
-```
-
-## 4. Python SDK
-
-如果研究代码运行在另一个Python或Conda环境，在该环境安装轻量客户端：
-
-```bash
-python -m pip install \
-  '/发布包目录/wheels/market_data_api-0.4.1-py3-none-any.whl[client]'
-```
-
-推荐逐批消费：
+`iter_batches(query)` 是一次性迭代器，每批为 `pyarrow.RecordBatch`。逐批处理并释放可以控制工作内存。`read_table(query)` 把全部结果放入一张 `pyarrow.Table`；完整结果是否保留在内存由调用方决定。
 
 ```python
 from market_data_api import MarketDataClient
 
-client = MarketDataClient()
-query = {
-    "dataset": "snapshots",
-    "start": "2026-05-29T09:15:00+08:00",
-    "end": "2026-05-29T09:25:00+08:00",
-    "mode": "direct",
-}
-
-print(client.estimate(query))
-
-for batch in client.iter_batches(query):
-    # batch是PyArrow RecordBatch；用户自行处理、保留或写入自己的存储
-    process(batch)
+with MarketDataClient.connect(cores=2, io_profile="hdd") as client:
+    table = client.read_table({
+        "dataset": "snapshots",
+        "start": "2026-09-04T09:30:00+08:00",
+        "end": "2026-09-04T09:35:00+08:00",
+        "symbols": ["000001.SZ"],
+        "columns": ["symbol", "event_time", "last_px_i32", "volume_i64"],
+    })
+    print(table)
+    print(client.last_read_stats)
 ```
 
-如果确定结果可以装入研究进程内存，也可以一次得到PyArrow Table：
+需要 Pandas / Polars 时可自行安装并转换；SDK 不自动转换价格单位或业务字段值。
 
-```python
-table = client.read_table(query)
-```
+## 股票、字段和时间
 
-`read_table()`占用的是用户研究进程内存，不属于本地API的内存保护范围。大结果优先使用
-`iter_batches()`。
+`symbols` 是精确股票代码集合；不会模糊匹配或自动补交易所后缀。省略或设为 None 表示全部，空数组报错。不存在的股票返回保留字段类型的空结果。
 
-## 5. 请求方式
+`columns` 决定最终返回的字段和顺序。过滤所需的 symbol、event_time 等列会在内部读取，但没有显式选择就不额外返回。
 
-### 单个连续区间
+时间使用 `[start, end)`。无时区时间按 Asia/Shanghai 解释。日期区间模式的 `end_date` 包含当天，并且必须同时指定每日窗口。
 
 ```python
 query = {
     "dataset": "trades",
-    "start": "2026-05-29T09:15:00+08:00",
-    "end": "2026-05-29T09:25:00+08:00",
-    "mode": "direct",
+    "start_date": "2026-09-01",
+    "end_date": "2026-09-04",
+    "daily_start": "09:30",
+    "daily_end": "10:00",
+    "symbols": ["000001.SZ", "600000.SH"],
+    "columns": ["symbol", "event_time", "price_i32", "qty_i32"],
 }
 ```
 
-时间范围采用半开区间`[start, end)`：包含09:15:00，不包含09:25:00。
+未提供所有必要参数、拼错参数、字段不存在、空字段数组均明确报错。没有任何已发布分区是 404；已有分区但股票或精确时间没有匹配行则返回空表。已发布 current 指向损坏或缺失版本索引时会报错，不把损坏当成合法的无数据日。API 不内置交易日历；未发布日期与非交易日需由调用方结合自身日历判断。
 
-### 多日每天相同时间窗口
+批次边界不是交易日或五分钟桶边界。结果按源对象和行组顺序读取，不保证全市场事件的全局时间排序。
 
-```python
-query = {
-    "dataset": "orders",
-    "start_date": "2026-05-25",
-    "end_date": "2026-05-29",
-    "daily_start": "09:15:00",
-    "daily_end": "09:25:00",
-    "mode": "direct",
-}
-```
+## 两种存储模式
 
-`end_date`包含在内。这个请求只拉五天各自09:15–09:25的数据，不会把日期之间的全天
-数据拉回本机。
+默认 `mode="direct"`：下载所需数据块，使用后释放，不在本机保存行情 Parquet。元数据有容量上限，连接及缓冲区可复用。
 
-### 只取部分列
+显式 `mode="cache"`：保留原来的完整五分钟对象缓存，第一次仍下载缺失桶的全部股票和字段，后续可复用。股票和字段过滤作用于返回结果。
 
-```python
-query["columns"] = ["symbol", "event_time", "last_px_i32"]
-```
+缓存更新策略：
 
-列不存在时返回HTTP 422，不会悄悄忽略。
+- `missing_only`：默认，不更新已有桶。
+- `if_changed`：跟随服务器版本更新。
+- `force`：重新下载所选桶的当前版本。
 
-## 6. direct和cache
+保留不更新已有桶的语义意味着同一天的不同缓存桶可能来自不同修订版本。需要最新修订时用 `if_changed`；需要研究数据完全可复现时应保存本次输入版本并管理独立数据快照。默认 direct 查询在清单获取时固定对象版本。
 
-| 模式 | 87网络读取 | 用户机器持久化 | 适用场景 |
-|---|---:|---:|---|
-| `direct` | 每次读取 | 否 | 一次性研究、磁盘紧张 |
-| `cache` | 只补缺失或需更新的桶 | 是 | 反复读取相同日期和时段 |
+`read_strategy="ranges"` 只适用于 direct，不能用于完整对象缓存。
 
-缓存位于`~/.cache/market-data-api`，由SQLite元数据和版本化Parquet对象组成。两种模式
-返回完全相同的Arrow Stream格式。
+## 读取策略与机械盘
 
-cache更新策略：
+| 选择 | 行为 |
+|---|---|
+| `auto` | 有股票或字段条件时计划行组/列块读取；结合传输量和寻道成本决定是否采用整文件 |
+| `ranges` | 强制按块读取，仍合并相邻块；适合对照测试或特定负载 |
+| `sequential` | 完整传输选中的文件，再在本机精确筛选 |
 
-- `missing_only`：默认；已有桶不更新，只补缺失桶；
-- `if_changed`：87版本发生变化时更新；
-- `force`：强制重新拉取所选桶的当前版本。
+三种策略返回相同逻辑数据。没有可用统计信息时保守保留行组，不猜测并丢弃记录。
 
 ```python
-query["mode"] = "cache"
-query["update"] = "if_changed"
+client = MarketDataClient.connect(
+    cores=2,
+    connections=2,
+    io_profile="hdd",
+    read_options={
+        "coalesce_gap_bytes": 512 * 1024,
+        "seek_cost_bytes": 1024 * 1024,
+        "sequential_threshold": 0.85,
+        "bundle_bytes": 16 * 1024 * 1024,
+        "metadata_cache_bytes": 64 * 1024 * 1024,
+    },
+)
 ```
 
-## 7. 先估算再读取
+`ssd` 预设使用更小的合并距离和寻道成本。参数影响计划，不改变结果。成本模型不实时探测所有文件是否命中系统页缓存；需要在自己的网络、存储和负载下做对照。
+
+完整对象通道保留网络和解码流水线；按块通道一次只规划有限对象，并对每组下载/解码所需内存单独检查。大对象不保证能装进任意小内存机器；不足时会拒绝或中止并抛出异常。
+
+## 多用户和生命周期
+
+每位用户使用独立令牌。同一个 Python 进程复用一个客户端即可；它维护有限连接池。可从多个线程调用同一原生客户端，`last_read_stats` 属于当前线程最近一次读取。所有读取结束后再关闭客户端。
+
+服务器默认最多两个传输通道，按用户轮转。内部小段结束会释放通道；队列和等待时间有上限。大量发起并发请求不会让机械盘更快。
+
+提前结束迭代时关闭生成器：
 
 ```python
-estimate = client.estimate(query)
-print(estimate["source_bytes"])
-print(estimate["estimated_arrow_memory"])
-print(estimate["estimated_working_memory"])
-print(estimate["missing_cache_bytes"])
+stream = client.iter_batches(query)
+try:
+    for batch in stream:
+        if enough_data(batch):
+            break
+finally:
+    stream.close()
 ```
 
-主要字段：
+可恢复的网络中断只重试未完成的对象。已经完整接收的对象不重复返回；重试预算耗尽后明确报错。API 不为用户已经执行的业务计算提供事务回滚。
 
-- `source_bytes`：预计从87传输的压缩Parquet字节数；
-- `estimated_arrow_memory`：完整结果物化为Arrow时的参考估算；
-- `estimated_working_memory`：本地API有界流水线预计工作内存；
-- `working_memory_limit`：本次请求动态计算的API工作内存额度；
-- `missing_cache_bytes`：cache模式需要补到本机的字节数。
+## 观察传输效果
 
-默认不限制总结果大小，但本地API会保护自身流水线：开始前根据当前可用内存预检，运行
-期间持续检查紧急余量。
+原生客户端完成读取后：
 
-## 8. 并发和循环
-
-- 本机自动检测CPU affinity和可用内存，最多使用8个核心；
-- 需要严格单核时运行`mdapi-local --cores 1`；
-- 87保持两个顺序数据流，四位用户竞争时按用户轮转；
-- 没有其他用户等待时，同一用户可借用第二条流；
-- 一个很长的API请求会自动拆成最多12个五分钟对象的传输段；每段结束即重新参与
-  按用户轮转，因此年度请求也不会长期霸占一条流。
-
-建议保持一个本机API进程，再在循环中不断调用同一个`MarketDataClient`。
-
-## 9. 网络中断和自动续传
-
-客户端与87之间是长期复用的HTTP连接，没有SSH过程。正常循环不会为每一天重新握手；
-只有连接失效时才创建新的TCP连接。
-
-默认对每个未完成对象自动重试3次，退避时间依次约为0.25、0.5、1秒：
-
-- `direct`先把一个完整Parquet对象接收到有界内存，再解码并输出。中途断线时，已经完整
-  输出的对象不会重发，只从当前未完成对象继续，因此成功完成的结果没有重复行；
-- `cache`按完整五分钟桶校验并立即提交。中途断线时保留已完成桶、删除不完整临时文件，
-  只补未完成桶；即使重试耗尽，下一次相同请求也会从缺失桶继续；
-- 续传粒度是五分钟对象，不是文件内部的字节偏移。当前对象会从头重传，这换取了简单
-  的完整性校验和确定的无重复语义。对象只有五分钟，最坏重传量有界。
-
-如果3次重试仍失败，cache在开始返回Arrow前会得到HTTP 502；direct可能已经向调用者
-交付了前面的完整批次，随后SDK抛出`MarketDataAPIError`。需要“全有或全无”的调用方
-必须只在迭代正常结束后提交自己的结果，不能把异常前收到的批次当成完整结果。
-
-可在本机配置中调整：
-
-```json
-{
-  "network_retries": 3,
-  "network_retry_backoff": 0.25,
-  "object_request_size": 12
-}
+```python
+print(client.last_read_stats)
 ```
 
-`object_request_size`越小，多用户轮转越及时；默认12约对应单文件布局的一小时数据，持久
-连接下额外HTTP开销很小。一般无需修改。
+主要字段：`source_bytes` 是选中完整文件的总大小；`metadata_bytes` 是元数据响应负载；`transfer_bytes` 是实际接收的数据段负载（包括重试收到的字节）；`planned_bytes`、`range_count`、`skipped_objects`、`sequential_objects`、`returned_rows`、`queue_ms` 用于诊断。`versions` 给出各日期实际读取的发布版本；cache 模式同日若出现多个版本会一并列出。
 
-## 10. 本机配置
+这些数据不包含 TCP/HTTP 头和上行请求体，不能直接当成网卡总字节数。`client.estimate(query)` 默认做轻量清单和资源检查；按块模式的具体传输量随窗口规划，`estimated_transfer_bytes` 为 None，最终看统计值。
 
-配置文件：
+本机 HTTP 入口继续使用 `MarketDataClient(base_url)` 和 `/v1/estimate`、`/v1/data`。本机服务可用 `mdapi-local --cores 2 --io-profile hdd`。原生客户端可连接 0.4 网关并以完整对象读取作为兼容路径；强制 ranges 会明确要求升级。
 
-```text
-~/.config/market-data-api/client.json
-```
-
-```json
-{
-  "gateway_host": "10.10.10.87",
-  "gateway_port": 18787,
-  "gateway_token": "个人令牌",
-  "cache_root": "/home/USER/.cache/market-data-api",
-  "local_host": "127.0.0.1",
-  "local_port": 18788,
-  "arrow_compression": "zstd",
-  "network_retries": 3,
-  "network_retry_backoff": 0.25,
-  "object_request_size": 12
-}
-```
-
-更换令牌最简单的方法是重新运行`install-client.sh`。也可以手工编辑，但必须保持权限为
-`0600`。
-
-临时改变端口或核心数：
-
-```bash
-~/.local/bin/mdapi-local --port 18888 --cores 1
-```
-
-## 11. HTTP接口
-
-- `GET /health`：本机状态；
-- `POST /v1/estimate`：估算，不取数据；
-- `POST /v1/data`：返回`application/vnd.apache.arrow.stream`。
-
-`/v1/data`返回的是二进制Arrow IPC Stream，不是JSON。非Python程序只要能读取Arrow
-Stream即可使用相同接口。
-
-## 12. 常见错误
-
-| HTTP状态 | 含义 | 处理方式 |
-|---:|---|---|
-| 401或502 `gateway_rejected` | 令牌错误、尚未创建用户或远端拒绝 | 联系管理员核对个人令牌 |
-| 502 `network_transfer_failed` | 自动重试后网络传输仍失败 | 检查网络；cache可直接重试并只补缺失桶 |
-| 404 | 所选时间没有已发布数据 | 核对日期、数据集和时间段 |
-| 413 | 工作内存预检不通过或显式结果上限 | 缩短区间、减少列或释放本机内存 |
-| 422 | 参数、列名或时间格式错误 | 根据返回detail修正请求 |
-| 503 | 运行期间本机可用内存低于安全余量 | 释放内存后重试 |
-
-如果`mdapi-local`无法启动，先检查18788端口是否被占用；可临时使用
-`mdapi-local --port 18888`。如果本机健康但取数失败，再检查到
-`10.10.10.87:18787`的网络连通性。
+`estimate` 中的 rows 和 estimated_arrow_memory 是未精确过滤的候选数据上界，不是最终股票结果的行数或内存。默认不设置总结果硬上限；工作内存另按读取窗口检查。

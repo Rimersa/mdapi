@@ -20,7 +20,13 @@ from .catalog import CatalogStore, ObjectEntry, manifest_summary
 from .model import DataRequest
 from .protocol import BUNDLE_MAGIC, encode_bundle_end, encode_part_header
 from .scheduler import FairStreamScheduler, StreamQueueTimeout
-from .range_gateway import CAPABILITIES, FooterCache, parse_http_range, validate_ranges
+from .range_gateway import (
+    CAPABILITIES,
+    FooterCache,
+    FooterStore,
+    parse_http_range,
+    validate_ranges,
+)
 
 
 @dataclass(frozen=True)
@@ -32,7 +38,9 @@ class SelectedObject:
 
     @property
     def payload_bytes(self):
-        return self.entry.bytes if self.ranges is None else sum(n for _, n in self.ranges)
+        return (
+            self.entry.bytes if self.ranges is None else sum(n for _, n in self.ranges)
+        )
 
 
 class GatewayState:
@@ -47,6 +55,7 @@ class GatewayState:
         max_streams: int,
         max_objects: int,
         queue_timeout: float,
+        metadata_index: Path | None = None,
     ) -> None:
         self.root = root.resolve(strict=True)
         self.catalog_store = CatalogStore(self.root)
@@ -62,7 +71,13 @@ class GatewayState:
         self.max_objects = max_objects
         self.queue_timeout = queue_timeout
         self.stream_scheduler = FairStreamScheduler(max_streams)
-        self.footer_cache = FooterCache()
+        if metadata_index is not None:
+            metadata_index = metadata_index.expanduser().resolve()
+            if metadata_index.is_relative_to(self.root):
+                raise ValueError("元数据缓存必须位于行情数据根目录之外")
+        self.footer_cache = FooterCache(
+            store=FooterStore(metadata_index) if metadata_index is not None else None
+        )
         self._token_lock = threading.Lock()
         if self.token_file:
             token_stat = self.token_file.stat()
@@ -153,10 +168,20 @@ class GatewayState:
         by_id = {value["object_id"]: value for value in references}
         result = []
         for item in selected:
-            ranges = validate_ranges(by_id[item.entry.object_id].get("ranges"), item.entry.bytes)
+            ranges = validate_ranges(
+                by_id[item.entry.object_id].get("ranges"), item.entry.bytes
+            )
             header = item.entry.as_dict()
-            header.update(file_bytes=item.entry.bytes, bytes=sum(n for _, n in ranges), ranges=ranges)
-            result.append(SelectedObject(item.entry, item.path, encode_part_header(header), ranges))
+            header.update(
+                file_bytes=item.entry.bytes,
+                bytes=sum(n for _, n in ranges),
+                ranges=ranges,
+            )
+            result.append(
+                SelectedObject(
+                    item.entry, item.path, encode_part_header(header), ranges
+                )
+            )
         return result
 
 
@@ -219,7 +244,10 @@ class MarketDataGatewayHandler(BaseHTTPRequestHandler):
     def _parse_request(self, query: dict[str, list[str]]) -> DataRequest:
         extra = set(query) - {"dataset", "start", "end", "daily_start", "daily_end"}
         if extra:
-            raise ValueError(f"文件清单接口不支持这些参数: {sorted(extra)}；请通过 SDK 或本机 API 筛选股票/字段")
+            raise ValueError(
+                f"文件清单接口不支持这些参数: {sorted(extra)}；请通过 SDK 或本机 API 筛选股票/字段"
+            )
+
         def one(name: str) -> str:
             values = query.get(name)
             if not values or len(values) != 1:
@@ -230,9 +258,7 @@ class MarketDataGatewayHandler(BaseHTTPRequestHandler):
             dataset=one("dataset"),
             start=one("start"),
             end=one("end"),
-            daily_start=(
-                one("daily_start") if "daily_start" in query else None
-            ),
+            daily_start=(one("daily_start") if "daily_start" in query else None),
             daily_end=one("daily_end") if "daily_end" in query else None,
         )
 
@@ -252,14 +278,10 @@ class MarketDataGatewayHandler(BaseHTTPRequestHandler):
                     "start": request.start.isoformat(),
                     "end": request.end.isoformat(),
                     "daily_start": (
-                        request.daily_start.isoformat()
-                        if request.daily_start
-                        else None
+                        request.daily_start.isoformat() if request.daily_start else None
                     ),
                     "daily_end": (
-                        request.daily_end.isoformat()
-                        if request.daily_end
-                        else None
+                        request.daily_end.isoformat() if request.daily_end else None
                     ),
                 },
                 "summary": manifest_summary(entries),
@@ -306,7 +328,9 @@ class MarketDataGatewayHandler(BaseHTTPRequestHandler):
             for offset, remaining in ranges:
                 while remaining:
                     try:
-                        sent = os.sendfile(self.connection.fileno(), handle.fileno(), offset, remaining)
+                        sent = os.sendfile(
+                            self.connection.fileno(), handle.fileno(), offset, remaining
+                        )
                     except BlockingIOError:
                         if not select.select([], [self.connection.fileno()], [], 60)[1]:
                             raise TimeoutError("数据消费者持续 60 秒未读取")
@@ -342,7 +366,10 @@ class MarketDataGatewayHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/x-marketdata-parquet-bundle")
             self.send_header("Content-Length", str(length))
             self.send_header("X-MDAPI-Objects", str(len(selected)))
-            self.send_header("X-MDAPI-Transfer-Bytes", str(sum(item.payload_bytes for item in selected)))
+            self.send_header(
+                "X-MDAPI-Transfer-Bytes",
+                str(sum(item.payload_bytes for item in selected)),
+            )
             self.send_header(
                 "X-MDAPI-Source-Bytes",
                 str(sum(item.entry.bytes for item in selected)),
@@ -393,12 +420,11 @@ class MarketDataGatewayHandler(BaseHTTPRequestHandler):
                     "version": __version__,
                     "capabilities": CAPABILITIES,
                     "footer_cache_bytes": self.state.footer_cache.bytes,
+                    "metadata_index_enabled": self.state.footer_cache.store is not None,
                     "configured_users": len(self.state.current_user_tokens()),
                     "catalog_generated_at": self.state.catalog_store.generated_at,
                     "catalog_format": self.state.catalog_store.format,
-                    "cached_catalog_shards": (
-                        self.state.catalog_store.cached_shards
-                    ),
+                    "cached_catalog_shards": (self.state.catalog_store.cached_shards),
                     "cached_catalog_pointers": (
                         self.state.catalog_store.cached_pointers
                     ),
@@ -427,7 +453,9 @@ class MarketDataGatewayHandler(BaseHTTPRequestHandler):
         except ValueError as exc:
             self._error(HTTPStatus.BAD_REQUEST, "invalid_request", str(exc))
         except OverflowError as exc:
-            self._error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "request_too_large", str(exc))
+            self._error(
+                HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "request_too_large", str(exc)
+            )
         except StreamQueueTimeout as exc:
             self._error(HTTPStatus.SERVICE_UNAVAILABLE, "gateway_busy", str(exc))
         except FileNotFoundError as exc:
@@ -444,17 +472,23 @@ class MarketDataGatewayHandler(BaseHTTPRequestHandler):
         item = self.state.select_refs([{k: v[0] for k, v in query.items()}])[0]
         etag = f'"{item.entry.object_id}"'
         if self.headers.get("If-Match") not in (None, "*", etag):
-            self._error(HTTPStatus.PRECONDITION_FAILED, "version_mismatch", "对象版本不匹配")
+            self._error(
+                HTTPStatus.PRECONDITION_FAILED, "version_mismatch", "对象版本不匹配"
+            )
             return
         try:
-            offset, count = parse_http_range(self.headers.get("Range"), item.entry.bytes)
-        except (ValueError, OverflowError) as exc:
+            offset, count = parse_http_range(
+                self.headers.get("Range"), item.entry.bytes
+            )
+        except (ValueError, OverflowError):
             self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
             self.send_header("Content-Range", f"bytes */{item.entry.bytes}")
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
-        with self.state.stream_scheduler.lease(principal, timeout=self.state.queue_timeout):
+        with self.state.stream_scheduler.lease(
+            principal, timeout=self.state.queue_timeout
+        ):
             ranged = self.headers.get("Range") is not None
             self._streaming_response = True
             self.send_response(HTTPStatus.PARTIAL_CONTENT if ranged else HTTPStatus.OK)
@@ -463,7 +497,10 @@ class MarketDataGatewayHandler(BaseHTTPRequestHandler):
             self.send_header("Accept-Ranges", "bytes")
             self.send_header("ETag", etag)
             if ranged:
-                self.send_header("Content-Range", f"bytes {offset}-{offset + count - 1}/{item.entry.bytes}")
+                self.send_header(
+                    "Content-Range",
+                    f"bytes {offset}-{offset + count - 1}/{item.entry.bytes}",
+                )
             self.end_headers()
             if not head:
                 self._sendfile_ranges(item.path, ((offset, count),))
@@ -503,7 +540,9 @@ class MarketDataGatewayHandler(BaseHTTPRequestHandler):
                 if parsed.path == "/v1/ranges":
                     allowed.add("ranges")
                 if set(value) - allowed:
-                    raise ValueError(f"对象引用包含未知字段: {sorted(set(value) - allowed)}")
+                    raise ValueError(
+                        f"对象引用包含未知字段: {sorted(set(value) - allowed)}"
+                    )
                 normalized.append(
                     {
                         "object_id": str(value.get("object_id", "")),
@@ -516,19 +555,26 @@ class MarketDataGatewayHandler(BaseHTTPRequestHandler):
                     normalized[-1]["ranges"] = value.get("ranges")
             if parsed.path == "/v1/metadata":
                 selected = self.state.select_refs(normalized)
-                with self.state.stream_scheduler.lease(principal, timeout=self.state.queue_timeout):
+                with self.state.stream_scheduler.lease(
+                    principal, timeout=self.state.queue_timeout
+                ):
                     self._json(HTTPStatus.OK, self.state.footer_cache.payload(selected))
                 return
             self._bundle_selected(
-                (self.state.select_ranges(normalized) if parsed.path == "/v1/ranges"
-                 else self.state.select_refs(normalized)),
+                (
+                    self.state.select_ranges(normalized)
+                    if parsed.path == "/v1/ranges"
+                    else self.state.select_refs(normalized)
+                ),
                 head=False,
                 principal=principal,
             )
         except ValueError as exc:
             self._error(HTTPStatus.BAD_REQUEST, "invalid_request", str(exc))
         except OverflowError as exc:
-            self._error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "request_too_large", str(exc))
+            self._error(
+                HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "request_too_large", str(exc)
+            )
         except StreamQueueTimeout as exc:
             self._error(HTTPStatus.SERVICE_UNAVAILABLE, "gateway_busy", str(exc))
         except FileNotFoundError as exc:
@@ -585,6 +631,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-streams", type=int, default=2)
     parser.add_argument("--max-objects", type=int, default=5000)
     parser.add_argument("--queue-timeout", type=float, default=300.0)
+    parser.add_argument(
+        "--metadata-index",
+        type=Path,
+        default=(
+            Path(os.environ["MDAPI_METADATA_INDEX"])
+            if os.environ.get("MDAPI_METADATA_INDEX")
+            else None
+        ),
+        help="可选的压缩元数据 SQLite 缓存，必须在行情数据根目录之外",
+    )
     return parser.parse_args(argv)
 
 
@@ -606,6 +662,7 @@ def main(argv: list[str] | None = None) -> int:
         max_streams=args.max_streams,
         max_objects=args.max_objects,
         queue_timeout=args.queue_timeout,
+        metadata_index=args.metadata_index,
     )
     server = MarketDataGatewayServer(
         (args.host, args.port),

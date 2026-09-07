@@ -1,92 +1,85 @@
-# Market Data API 一键安装
+# 0.5.0 安装与升级
 
-## 87服务器：一条安装命令
+现有行情 Parquet 和 catalog v2 无需修改。要获得按股票、字段减少传输量的能力，网关和客户端都应升级。
 
-把发布包复制到87、解压并进入目录后运行：
+## 87 服务器
 
-零用户锁定部署：
-
-```bash
-sudo ./install-server.sh /正式五分钟数据根目录
-```
-
-没有sudo时去掉`sudo`，会安装为当前账号的用户服务。直接创建用户时把用户名追加到命令
-末尾即可。
-
-这条命令会自动完成：
-
-- 安装单文件只读网关；
-- 创建空的安全用户库，或生成指定用户的独立令牌；
-- 写入服务器配置；
-- 安装并启动服务器端 systemd 服务；
-- 执行健康检查。
-
-数据根目录必须已经包含符合 [`SERVER_DATA_FORMAT.md`](SERVER_DATA_FORMAT.md) 的
-`catalog.json` 和五分钟 Parquet。安装程序不会切片，也不会写入或修改数据目录。
-长期运行必须使用固定根索引、按数据集/交易日/版本分片的catalog v2；旧v1迁移命令见
-[`DEPLOYMENT.md`](DEPLOYMENT.md)。
-
-零用户时健康接口可用，但所有数据接口保持锁定。
-
-以后新增用户无需重装或重启：
+解压 `market-data-api-0.5.0-easy-install.tar.gz`，进入目录：
 
 ```bash
-mdapi-user add alice
-mdapi-user list
-mdapi-user rotate alice
-mdapi-user remove alice
+./install-server.sh /data/market_data_5m
 ```
 
-用户文件采用原子更新，网关自动热加载。新增或轮换命令会显示需要安全交给该用户的
-令牌。
+87 当前采用 quant 的用户服务，延续该模式不加 sudo。系统服务部署才使用 sudo。安装器保留已有用户令牌和地址、端口、并发设置，更新程序并重启服务；不修改行情文件和 catalog。
 
-## 用户机器：一条安装命令
+新增的压缩元数据缓存位于：
 
-用户解压同一个发布包并进入目录后运行：
+- 用户服务：`~/.cache/market-data-api-server/footers.sqlite3`
+- 系统服务：`/var/cache/market-data-api/footers.sqlite3`
+
+用户服务需要管理员开启 `loginctl enable-linger quant` 才能保证无人登录时继续运行。
+
+## Python / Notebook 用户
+
+先激活自己使用的 Python / Conda 环境，在发行包目录执行：
 
 ```bash
-./install-client.sh 10.10.10.87
+./install-client.sh --native 10.10.10.87
 ```
 
-安装程序会静默询问该用户自己的令牌，然后自动创建隔离环境、安装依赖、保存配置并
-生成 `~/.local/bin/mdapi-local`。
-
-需要取数时运行：
+按提示输入管理员分配的个人令牌。已有配置的升级，也可以只安装新版 wheel：
 
 ```bash
-~/.local/bin/mdapi-local
+python -m pip install --upgrade 'wheels/market_data_api-0.5.0-py3-none-any.whl[client]'
 ```
 
-看到 `Uvicorn running on http://127.0.0.1:18788` 后即可使用。该命令在前台运行，
-按 `Ctrl+C` 就停止；不会注册 systemd，不会开机自启。
-
-## 取数
-
-研究环境安装轻量SDK：
-
-```bash
-python -m pip install '/发布包目录/wheels/market_data_api-0.4.1-py3-none-any.whl[client]'
-```
+开始读取：
 
 ```python
 from market_data_api import MarketDataClient
 
-client = MarketDataClient()
+client = MarketDataClient.connect()
 query = {
-    "dataset": "snapshots",
-    "start": "2026-05-29T09:15:00+08:00",
-    "end": "2026-05-29T09:25:00+08:00",
-    "mode": "direct",
+    "dataset": "orders",
+    "start_date": "2026-09-01",
+    "end_date": "2026-09-04",
+    "daily_start": "09:15",
+    "daily_end": "09:25",
+    "symbols": ["000001.SZ", "600000.SH"],
+    "columns": ["symbol", "event_time", "price_i32", "qty_i32"],
 }
-
 for batch in client.iter_batches(query):
-    process(batch)
+    print(batch.num_rows)
+print(client.last_read_stats)
+client.close()
 ```
 
-`mode="direct"`不落地；`mode="cache"`在用户机器增量缓存。用户循环取多天时只需保持
-`mdapi-local`这个终端不退出，整个循环不会建立SSH或反复启动远端进程。
+不需要启动额外服务，默认不保存行情对象。结果较小时可用 `client.read_table(query)` 得到完整 Arrow 表。
 
-临时断网默认自动重试3次。续传以完整五分钟对象为单位：direct不重复已经返回的对象，
-cache保留已完成桶并只补缺失桶。
+## 继续使用本机 HTTP API
 
-完整用户说明见[`USER_GUIDE.md`](USER_GUIDE.md)。
+```bash
+./install-client.sh 10.10.10.87
+~/.local/bin/mdapi-local
+```
+
+Notebook 环境也需安装上述客户端 wheel，然后保持原用法：
+
+```python
+from market_data_api import MarketDataClient
+client = MarketDataClient("http://127.0.0.1:18788")
+for batch in client.iter_batches(query):
+    print(batch.num_rows)
+```
+
+旧本机服务不支持股票过滤；升级后需要重新启动。SDK 会检查股票过滤确认信息，避免新参数被旧服务静默忽略。
+
+## 可选的元数据预热
+
+在已安装客户端的机器上运行，填充的是服务器辅助索引缓存，不是下载行情：
+
+```bash
+python tools/warm_metadata.py \
+  --config ~/.config/market-data-api/client.json \
+  --start-date 2026-09-01 --end-date 2026-09-04
+```

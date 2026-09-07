@@ -1,273 +1,103 @@
-# Market Data API
+# Market Data API 0.5.0
 
-当前发布版本：`0.4.1`。默认使用一键安装，见
-[`QUICKSTART.md`](QUICKSTART.md)；手工部署细节见
-[`DEPLOYMENT.md`](DEPLOYMENT.md)。
+按日期、时间、股票和字段读取远端逐笔数据，默认逐批返回，不在用户机器保存行情文件。
+**现有五分钟 Parquet 和 catalog v2 可直接使用，无需改写、重切或迁移数据。**
 
-本版本变更见[`RELEASE_NOTES.md`](RELEASE_NOTES.md)。
-带`v*`标签的提交会在GitHub Actions中重新通过测试、构建并发布校验过的安装包附件。
+0.5 新增股票过滤、行组和列块按需读取、机械盘成本选择、压缩元数据缓存，以及可直接连接网关的 Python 客户端。
 
-普通用户完整手册见[`USER_GUIDE.md`](USER_GUIDE.md)，服务器输入文件格式见
-[`SERVER_DATA_FORMAT.md`](SERVER_DATA_FORMAT.md)。
+## 快速使用
 
-这是一个独立的市场数据服务。它假设 87 上已经存在按 5 分钟切好的、
-只读 Parquet 派生数据，并提供：
-
-- 87 常驻只读网关：只选择文件并用 `sendfile` 零拷贝发送，不运行查询；
-- 本机 FastAPI：本机资源预检、精确时间过滤以及统一 Arrow Stream；
-- `direct`：边拉边用，不持久化；
-- `cache`：本地 SQLite 元数据库 + 版本化 Parquet 对象，按 5 分钟桶增量补齐；
-- 对象级自动重连续传：默认3次，已完成对象不重拉，cache保留已提交桶；
-- 固定根索引 + 数据集/交易日/版本分片catalog，历史增长不拖慢启动。
-
-生产网关本身不切数据，也不读原始数据湖。上游每日程序负责按
-[`SERVER_DATA_FORMAT.md`](SERVER_DATA_FORMAT.md) 产出五分钟 Parquet 成品目录和 catalog；
-网关只对这个独立成品目录进行只读服务。
-
-## 数据流
-
-```text
-上游每日数据程序
-        │ 原子发布5分钟成品
-        ▼
-                 独立成品目录/分片catalog v2
-                              │
-                              ▼
-                    87 常驻零拷贝网关
-                 （两个按用户公平调度的数据流）
-                              │ Parquet bundle
-                              ▼
-                      本机 FastAPI/SDK
-                    ├── direct：内存流水线
-                    └── cache：增量本地对象库
-                              │
-                              ▼
-                  application/vnd.apache.arrow.stream
-```
-
-87 到本机传输的是已经压缩的 Parquet 对象。精确到秒的边界过滤和 Arrow 编码在本机
-完成。网络读取与本机解码使用有界流水线重叠执行。
-
-根`catalog.json`固定约400字节，不保存全历史对象。网关只读取请求涉及日期的
-`current.json`及其不可变version分片，并用最多64个分片的LRU限制常驻元数据内存。
-每日新增数据只发布当天分片；无需重写或加载全部历史。
-
-## 一键部署
-
-服务器管理员：
+在自己的 Python / Conda 环境安装发行包里的客户端：
 
 ```bash
-sudo ./install-server.sh /正式五分钟数据根目录 alice bob carol dave（用户名示例）
+python -m pip install 'wheels/market_data_api-0.5.0-py3-none-any.whl[client]'
 ```
 
-每位用户：
-
-```bash
-./install-client.sh 10.10.10.87
-~/.local/bin/mdapi-local
-```
-
-客户端命令在前台运行，`Ctrl+C`停止，不安装systemd。完整说明见`QUICKSTART.md`。
-
-## 开发环境
-
-```bash
-cd /home/quant/market_data_api
-python -m venv --system-site-packages .venv
-.venv/bin/pip install -e '.[api,test]'
-```
-
-87 的网关只依赖 Python 标准库，不需要 FastAPI、DuckDB 或 PyArrow。
-
-## 开发时手动启动87只读网关
-
-```bash
-PYTHONPATH=/home/quant/market_data_api/src \
-/usr/bin/python3 -m market_data_api.gateway \
-  --root /home/quant/market_data_api_5m_example_v2 \
-  --host 10.10.10.87 \
-  --port 18787 \
-  --max-streams 2 \
-  --token-file /path/to/users.json
-```
-
-生产环境为每位用户配置独立令牌：
-
-```json
-{
-  "alice": "独立随机令牌1",
-  "bob": "独立随机令牌2",
-  "carol": "独立随机令牌3",
-  "dave": "独立随机令牌4"
-}
-```
-
-客户端通过 `--gateway-token` 使用自己的令牌。网关按令牌识别用户：多人等待时每位用户
-最多占一条流并按用户轮转；没有其他用户等待时，同一用户可以借用空闲的第二条流。
-`MDAPI_GATEWAY_TOKEN_FILE` 可代替 `--token-file`。旧的单一
-`MDAPI_GATEWAY_TOKEN` 仍兼容，但只能按客户端 IP 区分公平性。
-
-客户端使用建立后长期复用的 HTTP 连接；不会为每个请求建立 SSH，也不会在 87 上启动
-临时查询进程。长API请求默认拆成每段最多12个对象，既能让四位用户及时轮转，也避开
-单次网关对象数上限；网络中断时只重拉当前未完成对象。
-
-## 开发时手动启动本机 API
-
-```bash
-/home/quant/market_data_api/.venv/bin/mdapi serve-local \
-  --config ~/.config/market-data-api/client.json
-```
-
-省略 `--cores` 时，根据 CPU affinity 与可用内存自适应，最多使用 8 个本机核心。
-`--cores 1` 是严格单核模式。远端数据流默认最多两个。
-
-## 接口
-
-估算但不拉数据：
-
-```http
-POST /v1/estimate
-Content-Type: application/json
-```
-
-返回数据：
-
-```http
-POST /v1/data
-Content-Type: application/json
-Accept: application/vnd.apache.arrow.stream
-```
-
-请求示例：
-
-```json
-{
-  "dataset": "snapshots",
-  "start": "2026-05-29T09:15:00+08:00",
-  "end": "2026-05-29T09:25:00+08:00",
-  "mode": "cache",
-  "update": "missing_only",
-  "columns": null
-}
-```
-
-区间采用 `[start, end)`。数据集可为 `orders`、`trades` 或 `snapshots`。
-
-日期区间内每天取相同时间窗口时，可以直接使用更符合业务含义的形式；`end_date`
-是包含在内的：
-
-```json
-{
-  "dataset": "orders",
-  "start_date": "2026-05-25",
-  "end_date": "2026-05-29",
-  "daily_start": "09:15:00",
-  "daily_end": "09:25:00",
-  "mode": "direct",
-  "update": "missing_only"
-}
-```
-
-该请求只选择五个交易日各自 09:15–09:25 的桶，不会把日期之间的整日数据拉回。
-
-缓存更新模式：
-
-- `missing_only`：默认；已存在的桶不更新，只补新日期或缺失桶；
-- `if_changed`：远端版本变化时更新已有桶；
-- `force`：强制获取所选桶的当前远端版本。
-
-`direct` 和 `cache` 都返回相同的 Arrow IPC Stream。缓存模式第一次把缺失 Parquet
-写入 `.partial`，校验文件大小、行数后原子发布，再提交本地数据库事务。
-
-用户Python代码可以使用包内SDK：
+已有客户端配置时：
 
 ```python
 from market_data_api import MarketDataClient
 
-client = MarketDataClient()
-for batch in client.iter_batches({
-    "dataset": "snapshots",
-    "start": "2026-05-29T09:15:00+08:00",
-    "end": "2026-05-29T09:25:00+08:00",
-    "mode": "direct",
-}):
-    process(batch)
+with MarketDataClient.connect() as client:
+    query = {
+        "dataset": "snapshots",
+        "start": "2026-09-04T09:30:00+08:00",
+        "end": "2026-09-04T09:35:00+08:00",
+        "symbols": ["000001.SZ", "600000.SH"],
+        "columns": ["symbol", "event_time", "last_px_i32", "volume_i64"],
+    }
+    for batch in client.iter_batches(query):
+        print(batch.num_rows)
+    print(client.last_read_stats)
 ```
 
-## 资源预检
+`connect()` 读取 `~/.config/market-data-api/client.json`，复用到网关的 HTTP 连接，无需启动本机 FastAPI。新安装可运行 `./install-client.sh --native 10.10.10.87`，按提示输入个人令牌。
 
-本机从很小的 Manifest 得到：
+原来 `MarketDataClient()` → 本机 FastAPI 的调用方式仍然保留。使用股票过滤时，本机服务也必须升级到 0.5；新版 SDK 会拒绝没有确认股票过滤的旧服务响应。
 
-- 压缩传输字节数；
-- Parquet 解压字节估算；
-- 最大 5 分钟桶的工作内存；
-- cache 模式缺失字节数。
+## 读取逻辑
 
-总结果大小默认不设硬上限。`estimated_arrow_memory` 只作为信息返回；用户收到数据后是
-逐批处理、保留在内存还是自行落盘，不属于 API 的内存职责。确有需要时，用户仍可通过
-`--max-response-gib` 主动设置一个额外的结果硬上限。
+```text
+日期、时间、股票、字段
+  → catalog 确定不可变对象版本
+  → 元数据判断需要的行组与列块
+  → 合并相邻字节段，比较随机读与顺序读成本
+  → 87 发送相关压缩字节，或采用整文件顺序传输
+  → 客户端精确过滤股票与时间
+  → Arrow RecordBatch / Table
+```
 
-API 只保护自身有界流水线。工作内存按最大 5 分钟桶估算，使用真实样本校准后的保守
-倍率：snapshots 24x、orders 16x、trades 10x（相对压缩 Parquet 源字节）。每次请求均
-重新读取本机当前可用内存，先保留至少 512MiB 且不少于物理内存 5% 的紧急余量，再把
-剩余可用内存的 40% 作为流水线额度。估算工作内存超过额度时，在网络读取开始前返回
-HTTP 413。
+- 少数股票的多日读取：利用已有 symbol min/max 跳过无关行组。
+- 全市场短窗口：只读取重叠的五分钟桶；全字段时保留整文件通道。
+- 多人同时读取：按个人令牌公平轮转，空闲时允许借用额外通道。
+- 大查询拆成内部小段，不要求用户逐股票或逐文件请求。
+- Range 通道可能传输同块内的其他股票，最终结果只包含指定股票。
 
-运行期间还会在接收远端对象和解码 Arrow batch 时复查可用内存。低于紧急余量时主动
-终止数据流；能够正常抛出的 Python/PyArrow 内存异常会转换为
-`local_memory_exhausted`。操作系统直接触发 OOM Killer 时无法由已被杀死的进程返回
-错误，因此运行前预检和有界流水线仍是主要保护。
+## 常用参数
 
-并发同时受两个条件限制：
+| 参数 | 含义 |
+|---|---|
+| `dataset` | `orders`、`trades`、`snapshots` |
+| `start` / `end` | 上海时区的 `[start, end)`，支持 ISO-8601 时区 |
+| `start_date` / `end_date` | 包含首尾日期，需同时提供每日窗口；与 start/end 二选一 |
+| `daily_start` / `daily_end` | 每天相同的半开时间窗口 |
+| `symbols` | 精确股票代码数组；省略表示全部；空数组报错 |
+| `columns` | 返回字段及顺序；省略表示全部 |
+| `mode` | 默认 `direct`；显式 `cache` 会缓存完整五分钟对象 |
+| `read_strategy` | 默认 `auto`；也可强制 `ranges` 或 `sequential` |
+| `update` | cache 模式的 `missing_only`、`if_changed`、`force` |
 
-- CPU 核心预算；direct 最多使用两个远端长连接，cache 可独立使用本地核心预算；
-- 加权内存令牌。
+股票、字段、时间过滤可同时使用；过滤所需的辅助列不会额外出现在返回结果中。不存在的股票返回有 schema 的空表。未知参数和字段报错。物理行顺序保持源对象/行组的顺序，不保证全市场按时间全局排序。
 
-因此不会仅因机器核心数多就同时解压过多大桶。
+## 调优与边界
 
-## 四用户公平调度
+```python
+client = MarketDataClient.connect(
+    cores=2,
+    connections=2,
+    io_profile="hdd",    # 远端是 SSD 时可用 "ssd"
+    read_options={"coalesce_gap_bytes": 512 * 1024},
+)
+```
 
-87 仍保留两个数据流，以维持机械盘和网络的最高有效吞吐。长API请求会拆成每段最多
-12个对象，每个小bundle结束即重新参与按用户调度，不绑定长期HTTP连接：
+`auto` 使用可配置的成本模型，不声称能实时判断所有文件的页缓存状态。对照测试可强制 `sequential` / `ranges`；选择股票和字段的结果语义不变。原生客户端的 Arrow 线程预算作用于当前 Python 进程；需要独立处理环境或多个进程统一调度时，可继续使用本机 FastAPI。
 
-- 四位用户同时等待时，按用户轮转；
-- 同一用户的新请求排在其他等待用户之后；
-- 只有一位用户时可以同时使用两条流；
-- 用户API不设置总字节或日期范围限制，内部只限制单个公平调度分段；
-- 87网关响应和日志记录 `X-MDAPI-Queue-Ms` 排队时间。
+服务端仍只依赖 Python 标准库。安装器会在行情目录之外启用压缩元数据 SQLite 缓存，避免重复查询反复读取大量文件尾部。它不缓存或改写业务记录，可以删除重建。第一次访问未预热的历史区间仍可能受机械盘寻道影响。
 
-因此单次年度请求或年度`for`循环都不会永久占用槽位。
+## 文档与验证
 
-## 性能原则
+- [快速安装和升级](QUICKSTART.md)
+- [完整用户指南](USER_GUIDE.md)
+- [服务器部署](DEPLOYMENT.md)
+- [数据文件格式](SERVER_DATA_FORMAT.md)
+- [字节读取协议](RANGE_PROTOCOL.md)
+- [实测性能与测试条件](BENCHMARK.md)
+- [本版变更](RELEASE_NOTES.md)
 
-- Parquet 已压缩，传输时不再重复压缩；
-- 87 网关只做 Manifest 选择和 `sendfile`；
-- 长时间请求在同一持久连接上使用小bundle分段，不会逐文件重建连接；
-- HTTP 连接常驻复用；
-- Linux 页缓存承担热数据缓存，不在 Python 再复制一套内存缓存；
-- 机械盘冷读默认只允许少量顺序流，避免并发寻道；
-- 本机用两级有界流水线重叠网络读取与 Parquet 解码。
-
-`tools/bench_gateway.py` 测网关原始吞吐，`tools/bench_local_api.py` 测最终 Arrow API。
-完整五天实测见 [BENCHMARK.md](BENCHMARK.md)。
-
-## 测试
+开发与测试：
 
 ```bash
-/home/quant/market_data_api/.venv/bin/pytest -q
+python -m pip install -e '.[test]'
+python -m pytest -q
+python tools/build_release.py
 ```
-
-集成测试覆盖：
-
-- 5 分钟半开区间选择；
-- 常驻 HTTP bundle；
-- direct/cache Arrow 内容一致；
-- 第一次增量缓存和第二次零网络填充；
-- 远端版本变化时 `missing_only` 保持旧版本；
-- `if_changed` 原子切换到新版本；
-- FastAPI 应用创建；
-- 四用户按用户轮转及单用户空闲借用；
-- 默认无总结果硬上限、可选显式上限；
-- 动态工作内存拒绝与运行期内存异常转换；
-- 分片catalog固定根大小、按日期懒加载和不可变历史版本续读；
-- 传输中途断网后的对象级恢复及缓存断点保留。

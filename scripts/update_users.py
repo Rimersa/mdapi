@@ -50,7 +50,10 @@ def main() -> int:
         raise
 
     if not users:
-        print("未配置任何用户；网关数据接口将保持锁定。")
+        if tokens:
+            print(f"保留原有 {len(tokens)} 个用户及令牌。")
+        else:
+            print("未配置任何用户；网关数据接口将保持锁定。")
     elif created:
         print("新用户令牌（请分别安全交给对应用户）：")
         for user, token in created.items():

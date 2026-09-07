@@ -1,0 +1,27 @@
+{
+  "python": "3.10.19",
+  "rows": 6678,
+  "columns": [
+    "symbol",
+    "price_i32",
+    "qty_i32"
+  ],
+  "stats": {
+    "source_bytes": 324187811,
+    "metadata_bytes": 190843,
+    "transfer_bytes": 354414,
+    "planned_bytes": 354414,
+    "range_count": 2,
+    "skipped_objects": 2,
+    "sequential_objects": 0,
+    "returned_rows": 6678,
+    "network_requests": 2,
+    "retries": 0,
+    "queue_ms": 0.047,
+    "versions": {
+      "2026-08-27": [
+        "750807317977f86b"
+      ]
+    }
+  }
+}

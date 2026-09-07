@@ -5,6 +5,9 @@ from __future__ import annotations
 import base64
 import struct
 import threading
+import sqlite3
+import time
+import zlib
 from collections import OrderedDict
 
 
@@ -14,34 +17,123 @@ MAX_METADATA_OBJECTS = 32
 MAX_OBJECT_RANGES = 4096
 
 
+def decompress_footer(payload):
+    """Bound decompression before constructing any Arrow metadata objects."""
+    decoder = zlib.decompressobj()
+    result = decoder.decompress(payload, MAX_FOOTER_BYTES + 9)
+    if len(result) > MAX_FOOTER_BYTES + 8 or not decoder.eof or decoder.unused_data:
+        raise ValueError("压缩元数据不完整或超过 16MiB 限额")
+    return result
+
+
+class FooterStore:
+    """Optional bounded SQLite cache of compressed metadata outside the data root."""
+
+    def __init__(self, path, capacity=512 * 1024**2):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.path = path
+        self.capacity = capacity
+        self._local = threading.local()
+        self._connection().execute("""CREATE TABLE IF NOT EXISTS footers (
+            cache_key TEXT PRIMARY KEY, payload BLOB NOT NULL, stored_bytes INTEGER NOT NULL,
+            created REAL NOT NULL)""")
+        self._connection().execute(
+            "CREATE INDEX IF NOT EXISTS footer_age ON footers(created)"
+        )
+        self._puts = 0
+        self._lock = threading.Lock()
+
+    def _connection(self):
+        connection = getattr(self._local, "connection", None)
+        if connection is None:
+            connection = sqlite3.connect(self.path, timeout=5, isolation_level=None)
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("PRAGMA synchronous=NORMAL")
+            self._local.connection = connection
+        return connection
+
+    def get(self, key):
+        try:
+            row = (
+                self._connection()
+                .execute("SELECT payload FROM footers WHERE cache_key=?", (repr(key),))
+                .fetchone()
+            )
+            return decompress_footer(row[0]) if row else None
+        except (sqlite3.Error, zlib.error, ValueError):
+            return (
+                None  # A metadata cache failure must fall back to the original footer.
+            )
+
+    def put(self, key, footer):
+        payload = zlib.compress(footer, level=1)
+        try:
+            connection = self._connection()
+            connection.execute(
+                "INSERT OR REPLACE INTO footers VALUES (?, ?, ?, ?)",
+                (repr(key), payload, len(payload), time.time()),
+            )
+            with self._lock:
+                self._puts += 1
+                if self._puts % 128:
+                    return
+                total = connection.execute(
+                    "SELECT COALESCE(SUM(stored_bytes),0) FROM footers"
+                ).fetchone()[0]
+                while total > self.capacity:
+                    connection.execute(
+                        "DELETE FROM footers WHERE cache_key IN (SELECT cache_key FROM footers ORDER BY created LIMIT 128)"
+                    )
+                    total = connection.execute(
+                        "SELECT COALESCE(SUM(stored_bytes),0) FROM footers"
+                    ).fetchone()[0]
+        except sqlite3.Error:
+            pass
+
+
 class FooterCache:
     """Bounded, shared cache containing metadata only, never data column chunks."""
 
-    def __init__(self, capacity: int = 32 * 1024**2):
+    def __init__(self, capacity: int = 64 * 1024**2, store=None):
         self.capacity = capacity
         self.bytes = 0
         self._items = OrderedDict()
         self._lock = threading.Lock()
+        self.store = store
 
     def get(self, item):
         stat = item.path.stat()
-        key = (item.entry.object_id, stat.st_ino, stat.st_mtime_ns, stat.st_size)
+        key = (
+            item.entry.object_id,
+            item.entry.version,
+            stat.st_ino,
+            stat.st_mtime_ns,
+            stat.st_size,
+        )
         with self._lock:
             if key in self._items:
                 self._items.move_to_end(key)
                 return self._items[key]
-        with item.path.open("rb") as handle:
-            if stat.st_size < 12:
-                raise ValueError("Parquet 对象过短")
-            handle.seek(-8, 2)
-            tail = handle.read(8)
-            length = struct.unpack("<I", tail[:4])[0]
-            if tail[4:] != b"PAR1" or length > MAX_FOOTER_BYTES or length + 12 > stat.st_size:
-                raise ValueError("Parquet footer 非法或超过 16MiB 限额")
-            handle.seek(-8 - length, 2)
-            footer = handle.read(length) + tail
-            if len(footer) != length + 8:
-                raise EOFError("Parquet footer 读取不完整")
+        footer = self.store.get(key) if self.store is not None else None
+        if footer is None:
+            with item.path.open("rb") as handle:
+                if stat.st_size < 12:
+                    raise ValueError("Parquet 对象过短")
+                handle.seek(-8, 2)
+                tail = handle.read(8)
+                length = struct.unpack("<I", tail[:4])[0]
+                if (
+                    tail[4:] != b"PAR1"
+                    or length > MAX_FOOTER_BYTES
+                    or length + 12 > stat.st_size
+                ):
+                    raise ValueError("Parquet footer 非法或超过 16MiB 限额")
+                handle.seek(-8 - length, 2)
+                footer = handle.read(length) + tail
+                if len(footer) != length + 8:
+                    raise EOFError("Parquet footer 读取不完整")
+            if self.store is not None:
+                self.store.put(key, footer)
         with self._lock:
             previous = self._items.pop(key, None)
             if previous is not None:
@@ -59,12 +151,18 @@ class FooterCache:
             raise OverflowError(f"每次最多读取 {MAX_METADATA_OBJECTS} 个对象的元数据")
         return {
             "format": "market-data-parquet-footers-v1",
-            "objects": [{
-                "object_id": item.entry.object_id,
-                "version": item.entry.version,
-                "file_bytes": item.entry.bytes,
-                "footer": base64.b64encode(self.get(item)).decode("ascii"),
-            } for item in selected],
+            "footer_codec": "zlib",
+            "objects": [
+                {
+                    "object_id": item.entry.object_id,
+                    "version": item.entry.version,
+                    "file_bytes": item.entry.bytes,
+                    "footer": base64.b64encode(
+                        zlib.compress(self.get(item), level=1)
+                    ).decode("ascii"),
+                }
+                for item in selected
+            ],
         }
 
 
@@ -75,8 +173,11 @@ def validate_ranges(raw, file_bytes):
     result = []
     previous_end = 0
     for value in raw:
-        if (not isinstance(value, list) or len(value) != 2
-                or any(type(v) is not int for v in value)):
+        if (
+            not isinstance(value, list)
+            or len(value) != 2
+            or any(type(v) is not int for v in value)
+        ):
             raise ValueError("每个字节段必须是 [offset, length] 整数数组")
         offset, length = value
         if offset < previous_end or length <= 0 or offset + length > file_bytes:

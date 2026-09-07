@@ -10,9 +10,13 @@ from typing import Any
 
 class MarketDataAPIError(RuntimeError):
     def __init__(self, status: int | None, detail: Any) -> None:
-        message = detail if isinstance(detail, str) else json.dumps(
-            detail,
-            ensure_ascii=False,
+        message = (
+            detail
+            if isinstance(detail, str)
+            else json.dumps(
+                detail,
+                ensure_ascii=False,
+            )
         )
         super().__init__(f"Market Data API {status or 'network'}: {message}")
         self.status = status
@@ -35,6 +39,7 @@ class MarketDataClient:
     def connect(cls, **kwargs):
         """Connect directly to the gateway using the native, persistent client."""
         from .native import RemoteMarketDataClient
+
         return RemoteMarketDataClient(**kwargs)
 
     def _request(
@@ -77,7 +82,13 @@ class MarketDataClient:
 
     def estimate(self, query: Mapping[str, Any]) -> dict[str, Any]:
         with self._request("/v1/estimate", query) as response:
-            return json.load(response)
+            result = json.load(response)
+            if query.get("symbols") is not None and not result.get("symbols_supported"):
+                raise MarketDataAPIError(
+                    409,
+                    "本机 API 尚未支持股票过滤；请升级并重启 mdapi-local，或使用 MarketDataClient.connect()",
+                )
+            return result
 
     @contextlib.contextmanager
     def open_stream(self, query: Mapping[str, Any]):
@@ -88,6 +99,21 @@ class MarketDataClient:
         )
         reader = None
         try:
+            if (
+                query.get("symbols") is not None
+                and response.headers.get("X-MDAPI-Symbols-Applied") != "true"
+            ):
+                raise MarketDataAPIError(
+                    409,
+                    "本机 API 没有确认股票过滤，已拒绝返回可能包含全市场的数据；请升级本机服务",
+                )
+            if (
+                "read_strategy" in query
+                and response.headers.get("X-MDAPI-Read-Path") is None
+            ):
+                raise MarketDataAPIError(
+                    409, "本机 API 尚未支持 read_strategy，请升级本机服务"
+                )
             content_type = response.headers.get_content_type()
             if content_type != "application/vnd.apache.arrow.stream":
                 raw = response.read()

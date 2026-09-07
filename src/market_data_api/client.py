@@ -197,9 +197,7 @@ class GatewayConnection:
             objects = 0
             payload_bytes = 0
             while True:
-                header_size = struct.unpack(
-                    "!I", _read_exact(response, HEADER_SIZE)
-                )[0]
+                header_size = struct.unpack("!I", _read_exact(response, HEADER_SIZE))[0]
                 if header_size == 0:
                     break
                 if header_size > MAX_PART_HEADER:
@@ -286,10 +284,12 @@ class GatewayPool:
             connection.close()
 
 
-def _copy_limited(source: LimitedReader, target: BinaryIO) -> int:
+def _copy_limited(source: LimitedReader, target: BinaryIO, stats=None) -> int:
     written = 0
     while source.remaining:
         raw = source.read(min(source.remaining, 1024 * 1024))
+        if stats is not None:
+            stats.transfer_bytes += len(raw)
         target.write(raw)
         written += len(raw)
     return written
@@ -331,14 +331,12 @@ def _validate_object_header(entry: ObjectEntry, header: dict) -> None:
     object_id = str(header.get("object_id", ""))
     if object_id != entry.object_id:
         raise ValueError(
-            "网关对象顺序或标识错误: "
-            f"expected={entry.object_id}, actual={object_id}"
+            f"网关对象顺序或标识错误: expected={entry.object_id}, actual={object_id}"
         )
     header_bytes = int(header.get("bytes", -1))
     if header_bytes != entry.bytes:
         raise ValueError(
-            f"网关对象大小元数据错误: {object_id}: "
-            f"{header_bytes} != {entry.bytes}"
+            f"网关对象大小元数据错误: {object_id}: {header_bytes} != {entry.bytes}"
         )
     if str(header.get("version", "")) != entry.version:
         raise ValueError(f"网关对象版本已改变: {object_id}")
@@ -375,6 +373,7 @@ def fetch_cache_objects(
     network_retries: int = 3,
     network_retry_backoff: float = 0.25,
     object_request_size: int = 12,
+    stats=None,
 ) -> list[CachedObject]:
     if not entries:
         return []
@@ -389,6 +388,9 @@ def fetch_cache_objects(
         entries,
         key=lambda item: (item.bucket_start, item.relative_path),
     )
+    if stats is not None:
+        stats.planned_bytes = sum(entry.bytes for entry in ordered)
+        stats.sequential_objects = len(ordered)
     by_bucket: dict[str, list[ObjectEntry]] = {}
     bucket_order: list[str] = []
     for entry in ordered:
@@ -436,12 +438,11 @@ def fetch_cache_objects(
             entry = request_entries[expected_index]
             _validate_object_header(entry, header)
             with cache.partial_file(entry) as (partial, handle):
-                written = _copy_limited(source, handle)
+                written = _copy_limited(source, handle, stats)
             if written != entry.bytes:
                 partial.unlink(missing_ok=True)
                 raise RuntimeError(
-                    f"缓存对象字节数错误: {entry.object_id}: "
-                    f"{written} != {entry.bytes}"
+                    f"缓存对象字节数错误: {entry.object_id}: {written} != {entry.bytes}"
                 )
             import pyarrow.parquet as pq
 
@@ -449,12 +450,9 @@ def fetch_cache_objects(
             if rows != entry.rows:
                 partial.unlink(missing_ok=True)
                 raise RuntimeError(
-                    f"缓存对象行数错误: {entry.object_id}: "
-                    f"{rows} != {entry.rows}"
+                    f"缓存对象行数错误: {entry.object_id}: {rows} != {entry.rows}"
                 )
-            bucket_downloads.setdefault(entry.bucket_start, []).append(
-                (entry, partial)
-            )
+            bucket_downloads.setdefault(entry.bucket_start, []).append((entry, partial))
             bucket_received[entry.bucket_start] = (
                 bucket_received.get(entry.bucket_start, 0) + 1
             )
@@ -468,10 +466,14 @@ def fetch_cache_objects(
                 completed_buckets_this_attempt += 1
 
         try:
+            if stats is not None:
+                stats.network_requests += 1
             metrics = connection.consume_objects(
                 request_entries,
                 consume,
             )
+            if stats is not None:
+                stats.queue_ms += metrics.queue_ms
             if metrics.objects != len(request_entries) or expected_index != len(
                 request_entries
             ):
@@ -502,6 +504,8 @@ def fetch_cache_objects(
                 raise
             connection.close()
             retries_used += 1
+            if stats is not None:
+                stats.retries += 1
             if retries_used > network_retries:
                 raise _network_failure(
                     exc,
@@ -532,71 +536,80 @@ def _iter_filtered_batches_from_parquet(
     import pyarrow.compute as pc
     import pyarrow.parquet as pq
 
-    parquet = pq.ParquetFile(source, metadata=metadata, pre_buffer=False)
-    schema_names = set(parquet.schema_arrow.names)
-    if request.columns is not None:
-        missing = sorted(set(request.columns) - schema_names)
-        if missing:
-            raise ValueError(f"不存在这些列: {missing}")
-        columns = list(request.columns)
-        if "event_time" not in columns:
-            columns.append("event_time")
-        if request.daily_start is not None and "time_int" not in columns:
-            columns.append("time_int")
-        if request.symbols is not None and "symbol" not in columns:
-            columns.append("symbol")
-    else:
-        columns = None
-    start = request.start.replace(tzinfo=None)
-    end = request.end.replace(tzinfo=None)
-    start_scalar = pa.scalar(start, type=pa.timestamp("us"))
-    end_scalar = pa.scalar(end, type=pa.timestamp("us"))
-    had_rows = False
-    for batch in parquet.iter_batches(
-        batch_size=batch_rows,
-        columns=columns,
-        use_threads=True,
-        row_groups=row_groups,
-    ):
-        if memory_check is not None:
-            memory_check("parquet_batch")
-        event_time = batch.column(batch.schema.get_field_index("event_time"))
-        mask = pc.and_(
-            pc.greater_equal(event_time, start_scalar),
-            pc.less(event_time, end_scalar),
-        )
-        if request.daily_start is not None:
-            if "time_int" not in batch.schema.names:
-                raise ValueError("源数据缺少每日窗口过滤所需的 time_int")
-            time_int = batch.column(batch.schema.get_field_index("time_int"))
-
-            def encoded(value) -> int:
-                return (
-                    value.hour * 10_000_000
-                    + value.minute * 100_000
-                    + value.second * 1_000
-                    + value.microsecond // 1_000
-                )
-
-            daily = pc.and_(
-                pc.greater_equal(time_int, encoded(request.daily_start)),
-                pc.less(time_int, encoded(request.daily_end)),
+    with contextlib.closing(
+        pq.ParquetFile(source, metadata=metadata, pre_buffer=False)
+    ) as parquet:
+        schema_names = set(parquet.schema_arrow.names)
+        if request.columns is not None:
+            missing = sorted(set(request.columns) - schema_names)
+            if missing:
+                raise ValueError(f"不存在这些列: {missing}")
+            columns = list(request.columns)
+            if "event_time" not in columns:
+                columns.append("event_time")
+            if request.daily_start is not None and "time_int" not in columns:
+                columns.append("time_int")
+            if request.symbols is not None and "symbol" not in columns:
+                columns.append("symbol")
+        else:
+            columns = None
+        start = request.start.replace(tzinfo=None)
+        end = request.end.replace(tzinfo=None)
+        start_scalar = pa.scalar(start, type=pa.timestamp("us"))
+        end_scalar = pa.scalar(end, type=pa.timestamp("us"))
+        had_rows = False
+        for batch in parquet.iter_batches(
+            batch_size=batch_rows,
+            columns=columns,
+            use_threads=True,
+            row_groups=row_groups,
+        ):
+            if memory_check is not None:
+                memory_check("parquet_batch")
+            event_time = batch.column(batch.schema.get_field_index("event_time"))
+            mask = pc.and_(
+                pc.greater_equal(event_time, start_scalar),
+                pc.less(event_time, end_scalar),
             )
-            mask = pc.and_(mask, daily)
-        if request.symbols is not None:
-            symbols = batch.column(batch.schema.get_field_index("symbol"))
-            mask = pc.and_(mask, pc.is_in(symbols, value_set=pa.array(request.symbols)))
-        filtered = batch.filter(mask)
-        if request.columns is not None:
-            filtered = filtered.select(request.columns)
-        if filtered.num_rows:
-            had_rows = True
-            yield filtered
-    if not had_rows:
-        schema = parquet.schema_arrow
-        if request.columns is not None:
-            schema = pa.schema([schema.field(name) for name in request.columns], metadata=schema.metadata)
-        yield pa.RecordBatch.from_arrays([pa.array([], type=f.type) for f in schema], schema=schema)
+            if request.daily_start is not None:
+                if "time_int" not in batch.schema.names:
+                    raise ValueError("源数据缺少每日窗口过滤所需的 time_int")
+                time_int = batch.column(batch.schema.get_field_index("time_int"))
+
+                def encoded(value) -> int:
+                    return (
+                        value.hour * 10_000_000
+                        + value.minute * 100_000
+                        + value.second * 1_000
+                        + value.microsecond // 1_000
+                    )
+
+                daily = pc.and_(
+                    pc.greater_equal(time_int, encoded(request.daily_start)),
+                    pc.less(time_int, encoded(request.daily_end)),
+                )
+                mask = pc.and_(mask, daily)
+            if request.symbols is not None:
+                symbols = batch.column(batch.schema.get_field_index("symbol"))
+                mask = pc.and_(
+                    mask, pc.is_in(symbols, value_set=pa.array(request.symbols))
+                )
+            filtered = batch.filter(mask)
+            if request.columns is not None:
+                filtered = filtered.select(request.columns)
+            if filtered.num_rows:
+                had_rows = True
+                yield filtered
+        if not had_rows:
+            schema = parquet.schema_arrow
+            if request.columns is not None:
+                schema = pa.schema(
+                    [schema.field(name) for name in request.columns],
+                    metadata=schema.metadata,
+                )
+            yield pa.RecordBatch.from_arrays(
+                [pa.array([], type=f.type) for f in schema], schema=schema
+            )
 
 
 def iter_remote_batches(
@@ -646,7 +659,7 @@ def iter_remote_batches(
             while next_index < len(ordered) and not stopped.is_set():
                 request_entries = []
                 request_bytes = 0
-                for entry in ordered[next_index:next_index + object_request_size]:
+                for entry in ordered[next_index : next_index + object_request_size]:
                     if request_entries and request_bytes + entry.bytes > bundle_bytes:
                         break
                     request_entries.append(entry)
@@ -665,9 +678,7 @@ def iter_remote_batches(
                     if memory_check is not None:
                         memory_check("remote_object_buffer")
                     buffer = io.BytesIO()
-                    written = _copy_limited(source, buffer)
-                    if stats is not None:
-                        stats.transfer_bytes += written
+                    written = _copy_limited(source, buffer, stats)
                     if written != entry.bytes:
                         raise RuntimeError(
                             f"direct 对象字节数错误: {entry.object_id}: "
@@ -688,9 +699,8 @@ def iter_remote_batches(
                     )
                     if stats is not None:
                         stats.queue_ms += metrics.queue_ms
-                    if (
-                        metrics.objects != len(request_entries)
-                        or expected_index != len(request_entries)
+                    if metrics.objects != len(request_entries) or expected_index != len(
+                        request_entries
                     ):
                         raise EOFError(
                             "网关对象数错误: "

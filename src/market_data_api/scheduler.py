@@ -35,7 +35,13 @@ class FairStreamScheduler:
     opening many connections cannot move one user ahead of everybody else.
     """
 
-    def __init__(self, max_streams: int, *, max_pending_per_user: int = 16, max_pending: int = 128) -> None:
+    def __init__(
+        self,
+        max_streams: int,
+        *,
+        max_pending_per_user: int = 16,
+        max_pending: int = 128,
+    ) -> None:
         if max_streams < 1:
             raise ValueError("max_streams 必须 >= 1")
         self.max_streams = max_streams
@@ -48,14 +54,8 @@ class FairStreamScheduler:
         self._active_total = 0
 
     def _participants_locked(self) -> set[str]:
-        return {
-            user_id
-            for user_id, count in self._active.items()
-            if count > 0
-        } | {
-            user_id
-            for user_id, values in self._queues.items()
-            if values
+        return {user_id for user_id, count in self._active.items() if count > 0} | {
+            user_id for user_id, values in self._queues.items() if values
         }
 
     def _eligible_locked(self, user_id: str) -> bool:
@@ -120,8 +120,10 @@ class FairStreamScheduler:
         waiter = _Waiter(user_id=user_id, queued_at=time.monotonic())
         deadline = waiter.queued_at + timeout
         with self._condition:
-            if (len(self._queues.get(user_id, ())) >= self.max_pending_per_user
-                    or sum(map(len, self._queues.values())) >= self.max_pending):
+            if (
+                len(self._queues.get(user_id, ())) >= self.max_pending_per_user
+                or sum(map(len, self._queues.values())) >= self.max_pending
+            ):
                 raise StreamQueueTimeout("远端等待队列已满，请减少并发请求后重试")
             values = self._queues.setdefault(user_id, collections.deque())
             if not values:
@@ -133,9 +135,7 @@ class FairStreamScheduler:
                 if remaining <= 0:
                     self._remove_waiter_locked(waiter)
                     self._schedule_locked()
-                    raise StreamQueueTimeout(
-                        f"用户 {user_id} 等待远端数据流超时"
-                    )
+                    raise StreamQueueTimeout(f"用户 {user_id} 等待远端数据流超时")
                 self._condition.wait(remaining)
                 self._schedule_locked()
         return StreamLease(
