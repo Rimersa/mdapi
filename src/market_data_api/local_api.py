@@ -9,6 +9,7 @@ from pathlib import Path
 from . import __version__
 from .client import GatewayError, NetworkTransferError
 from .model import DataRequest
+from .selective import ReadOptions
 from .service import (
     DataService,
     LocalMemoryExhausted,
@@ -35,6 +36,7 @@ class LocalAPIConfig:
     network_retries: int
     network_retry_backoff: float
     object_request_size: int
+    io_profile: str
 
 
 def _load_client_config(path: Path, *, required: bool) -> dict:
@@ -139,6 +141,8 @@ def _resolve_config(args: argparse.Namespace) -> LocalAPIConfig:
         raise ValueError("network_retry_backoff不能为负数")
     if object_request_size < 1:
         raise ValueError("object_request_size必须>=1")
+    io_profile = str(choose(args.io_profile, "MDAPI_IO_PROFILE", "io_profile", "hdd"))
+    ReadOptions.for_profile(io_profile)
     return LocalAPIConfig(
         gateway_host=gateway_host,
         gateway_port=gateway_port,
@@ -152,6 +156,7 @@ def _resolve_config(args: argparse.Namespace) -> LocalAPIConfig:
         network_retries=network_retries,
         network_retry_backoff=network_retry_backoff,
         object_request_size=object_request_size,
+        io_profile=io_profile,
     )
 
 
@@ -159,13 +164,14 @@ def create_app(service: DataService):
     try:
         from fastapi import FastAPI, HTTPException
         from fastapi.responses import StreamingResponse
-        from pydantic import BaseModel, Field
+        from pydantic import BaseModel, Field, ConfigDict
     except ImportError as exc:
         raise RuntimeError(
             "本机 API 依赖未安装；请安装 market-data-api[api]"
         ) from exc
 
     class DataQuery(BaseModel):
+        model_config = ConfigDict(extra="forbid")
         dataset: str
         start: str | None = None
         end: str | None = None
@@ -176,39 +182,11 @@ def create_app(service: DataService):
         columns: list[str] | None = Field(default=None)
         daily_start: str | None = None
         daily_end: str | None = None
+        symbols: list[str] | None = None
+        read_strategy: str = "auto"
 
     def make_request(query: DataQuery) -> DataRequest:
-        raw = query.model_dump()
-        start_date = raw.pop("start_date")
-        end_date = raw.pop("end_date")
-        has_continuous = raw["start"] is not None or raw["end"] is not None
-        has_daily_range = start_date is not None or end_date is not None
-        if has_continuous == has_daily_range:
-            raise ValueError(
-                "必须二选一：start/end，或 start_date/end_date + 每日时间窗口"
-            )
-        if has_daily_range:
-            if not start_date or not end_date:
-                raise ValueError("start_date 和 end_date 必须同时指定")
-            if not raw["daily_start"] or not raw["daily_end"]:
-                raise ValueError(
-                    "日期区间模式必须同时指定 daily_start 和 daily_end"
-                )
-            first = dt.date.fromisoformat(start_date)
-            last = dt.date.fromisoformat(end_date)
-            if last < first:
-                raise ValueError("end_date 不能早于 start_date")
-            raw["start"] = f"{first.isoformat()}T00:00:00+08:00"
-            raw["end"] = (
-                dt.datetime.combine(
-                    last + dt.timedelta(days=1),
-                    dt.time(),
-                ).isoformat()
-                + "+08:00"
-            )
-        elif raw["start"] is None or raw["end"] is None:
-            raise ValueError("start 和 end 必须同时指定")
-        return DataRequest.from_values(**raw)
+        return DataRequest.from_query(query.model_dump())
 
     @asynccontextmanager
     async def lifespan(_app):
@@ -301,6 +279,18 @@ def create_app(service: DataService):
             request = make_request(query)
             plan = service.preflight(request)
             _, stream = service.arrow_stream(request, plan)
+            # Validate the first output before sending HTTP 200; preserve generator cleanup.
+            try:
+                first_chunk = next(stream)
+            except BaseException:
+                stream.close()
+                raise
+            def primed_stream():
+                try:
+                    yield first_chunk
+                    yield from stream
+                finally:
+                    stream.close()
             headers = {
                 "X-MDAPI-Source-Bytes": str(plan.selection.source_bytes),
                 "X-MDAPI-Estimated-Uncompressed-Bytes": str(
@@ -317,10 +307,11 @@ def create_app(service: DataService):
                 ),
                 "X-MDAPI-Rows": str(plan.selection.rows),
                 "X-MDAPI-Mode": request.mode.value,
+                "X-MDAPI-Read-Path": "adaptive_ranges" if plan.selective else "whole_objects",
                 "X-MDAPI-Missing-Cache-Bytes": str(plan.missing_cache_bytes),
             }
             return StreamingResponse(
-                stream,
+                primed_stream(),
                 media_type="application/vnd.apache.arrow.stream",
                 headers=headers,
             )
@@ -377,6 +368,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--host")
     parser.add_argument("--port", type=int)
+    parser.add_argument("--io-profile", choices=("hdd", "ssd"), help="远端存储读盘模式；默认 hdd")
     parser.add_argument(
         "--cores",
         type=int,
@@ -434,6 +426,7 @@ def main(argv: list[str] | None = None) -> int:
         network_retries=config.network_retries,
         network_retry_backoff=config.network_retry_backoff,
         object_request_size=config.object_request_size,
+        read_options=ReadOptions.for_profile(config.io_profile),
     )
     service = DataService(
         gateway_host=config.gateway_host,

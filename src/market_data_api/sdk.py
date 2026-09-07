@@ -31,6 +31,12 @@ class MarketDataClient:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
 
+    @classmethod
+    def connect(cls, **kwargs):
+        """Connect directly to the gateway using the native, persistent client."""
+        from .native import RemoteMarketDataClient
+        return RemoteMarketDataClient(**kwargs)
+
     def _request(
         self,
         path: str,

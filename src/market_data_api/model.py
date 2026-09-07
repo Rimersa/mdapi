@@ -82,6 +82,8 @@ class DataRequest:
     columns: tuple[str, ...] | None = None
     daily_start: dt.time | None = None
     daily_end: dt.time | None = None
+    symbols: tuple[str, ...] | None = None
+    read_strategy: str = "auto"
 
     def __post_init__(self) -> None:
         if self.dataset not in DATASETS:
@@ -103,10 +105,20 @@ class DataRequest:
         object.__setattr__(self, "daily_start", daily_start)
         object.__setattr__(self, "daily_end", daily_end)
         if self.columns is not None:
+            if isinstance(self.columns, str) or any(not isinstance(c, str) or not c for c in self.columns):
+                raise ValueError("columns 必须是字段名称数组")
             columns = tuple(dict.fromkeys(self.columns))
             if not columns:
                 raise ValueError("columns 不能为空")
             object.__setattr__(self, "columns", columns)
+        if self.symbols is not None:
+            if isinstance(self.symbols, str):
+                raise ValueError("symbols 必须是股票代码数组")
+            if not self.symbols or any(not isinstance(s, str) or not s.strip() for s in self.symbols):
+                raise ValueError("symbols 必须是非空字符串数组；取全部股票时省略此参数")
+            object.__setattr__(self, "symbols", tuple(dict.fromkeys(s.strip() for s in self.symbols)))
+        if self.read_strategy not in {"auto", "ranges", "sequential"}:
+            raise ValueError("read_strategy 必须是 auto、ranges 或 sequential")
 
     @classmethod
     def from_values(
@@ -120,6 +132,8 @@ class DataRequest:
         columns: list[str] | tuple[str, ...] | None = None,
         daily_start: str | dt.time | None = None,
         daily_end: str | dt.time | None = None,
+        symbols: list[str] | tuple[str, ...] | None = None,
+        read_strategy: str = "auto",
     ) -> "DataRequest":
         return cls(
             dataset=dataset,
@@ -127,9 +141,11 @@ class DataRequest:
             end=parse_datetime(end),
             mode=FetchMode(mode),
             update=UpdateMode(update),
-            columns=tuple(columns) if columns else None,
+            columns=tuple(columns) if columns is not None else None,
             daily_start=parse_daily_time(daily_start),
             daily_end=parse_daily_time(daily_end),
+            symbols=symbols,
+            read_strategy=read_strategy,
         )
 
     def bucket_overlaps(
@@ -146,6 +162,33 @@ class DataRequest:
         start_time = start.timetz().replace(tzinfo=None)
         end_time = end.timetz().replace(tzinfo=None)
         return end_time > self.daily_start and start_time < self.daily_end
+
+    @classmethod
+    def from_query(cls, query):
+        """Normalize the same strict query contract for HTTP and native clients."""
+        raw = dict(query)
+        allowed = {"dataset", "start", "end", "start_date", "end_date", "daily_start", "daily_end",
+                   "columns", "symbols", "mode", "update", "read_strategy"}
+        if set(raw) - allowed:
+            raise ValueError(f"不支持的请求参数: {sorted(set(raw) - allowed)}")
+        if "dataset" not in raw:
+            raise ValueError("必须指定 dataset")
+        first, last = raw.pop("start_date", None), raw.pop("end_date", None)
+        continuous = raw.get("start") is not None or raw.get("end") is not None
+        daily = first is not None or last is not None
+        if continuous == daily:
+            raise ValueError("必须二选一：start/end，或 start_date/end_date + 每日时间窗口")
+        if daily:
+            if first is None or last is None or not raw.get("daily_start") or not raw.get("daily_end"):
+                raise ValueError("日期区间模式需要 start_date/end_date 和 daily_start/daily_end")
+            first, last = dt.date.fromisoformat(first), dt.date.fromisoformat(last)
+            if last < first:
+                raise ValueError("end_date 不能早于 start_date")
+            raw["start"] = f"{first.isoformat()}T00:00:00+08:00"
+            raw["end"] = f"{(last + dt.timedelta(days=1)).isoformat()}T00:00:00+08:00"
+        if raw.get("start") is None or raw.get("end") is None:
+            raise ValueError("start 和 end 必须同时指定")
+        return cls.from_values(**raw)
 
 
 @dataclass(frozen=True)

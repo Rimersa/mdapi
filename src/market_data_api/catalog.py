@@ -460,6 +460,7 @@ class CatalogStore:
         trade_date: str,
         version: str | None = None,
     ) -> CatalogShard | None:
+        from_pointer = version is None
         if version is None:
             pointer = self._load_pointer(dataset, trade_date)
             if pointer is None:
@@ -480,6 +481,8 @@ class CatalogStore:
         except FileNotFoundError:
             with self._lock:
                 self._shards.pop(path, None)
+            if from_pointer:
+                raise FileNotFoundError(f"已发布的 current 指向缺失的版本索引: {path}")
             return None
         shard = CatalogShard.from_dict(raw)
         if (

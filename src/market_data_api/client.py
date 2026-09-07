@@ -65,6 +65,7 @@ class Selection:
     uncompressed_bytes: int
     rows: int
     catalog_generated_at: str
+    capabilities: tuple[str, ...] = ()
 
 
 class LimitedReader:
@@ -181,6 +182,7 @@ class GatewayConnection:
             uncompressed_bytes=int(summary["uncompressed_bytes"]),
             rows=int(summary["rows"]),
             catalog_generated_at=str(payload["catalog_generated_at"]),
+            capabilities=tuple(payload.get("capabilities", ())),
         )
 
     def _consume_response(
@@ -523,12 +525,14 @@ def _iter_filtered_batches_from_parquet(
     *,
     batch_rows: int,
     memory_check: Callable[[str], None] | None = None,
+    metadata=None,
+    row_groups: list[int] | None = None,
 ):
     import pyarrow as pa
     import pyarrow.compute as pc
     import pyarrow.parquet as pq
 
-    parquet = pq.ParquetFile(source)
+    parquet = pq.ParquetFile(source, metadata=metadata, pre_buffer=False)
     schema_names = set(parquet.schema_arrow.names)
     if request.columns is not None:
         missing = sorted(set(request.columns) - schema_names)
@@ -539,16 +543,20 @@ def _iter_filtered_batches_from_parquet(
             columns.append("event_time")
         if request.daily_start is not None and "time_int" not in columns:
             columns.append("time_int")
+        if request.symbols is not None and "symbol" not in columns:
+            columns.append("symbol")
     else:
         columns = None
     start = request.start.replace(tzinfo=None)
     end = request.end.replace(tzinfo=None)
     start_scalar = pa.scalar(start, type=pa.timestamp("us"))
     end_scalar = pa.scalar(end, type=pa.timestamp("us"))
+    had_rows = False
     for batch in parquet.iter_batches(
         batch_size=batch_rows,
         columns=columns,
         use_threads=True,
+        row_groups=row_groups,
     ):
         if memory_check is not None:
             memory_check("parquet_batch")
@@ -575,11 +583,20 @@ def _iter_filtered_batches_from_parquet(
                 pc.less(time_int, encoded(request.daily_end)),
             )
             mask = pc.and_(mask, daily)
+        if request.symbols is not None:
+            symbols = batch.column(batch.schema.get_field_index("symbol"))
+            mask = pc.and_(mask, pc.is_in(symbols, value_set=pa.array(request.symbols)))
         filtered = batch.filter(mask)
         if request.columns is not None:
             filtered = filtered.select(request.columns)
         if filtered.num_rows:
+            had_rows = True
             yield filtered
+    if not had_rows:
+        schema = parquet.schema_arrow
+        if request.columns is not None:
+            schema = pa.schema([schema.field(name) for name in request.columns], metadata=schema.metadata)
+        yield pa.RecordBatch.from_arrays([pa.array([], type=f.type) for f in schema], schema=schema)
 
 
 def iter_remote_batches(
@@ -593,6 +610,8 @@ def iter_remote_batches(
     network_retries: int = 3,
     network_retry_backoff: float = 0.25,
     object_request_size: int = 12,
+    stats=None,
+    bundle_bytes: int = 64 * 1024**2,
 ) -> Iterator:
     if network_retries < 0:
         raise ValueError("network_retries 不能为负数")
@@ -604,6 +623,9 @@ def iter_remote_batches(
         entries,
         key=lambda item: (item.bucket_start, item.relative_path),
     )
+    if stats is not None:
+        stats.planned_bytes = sum(entry.bytes for entry in ordered)
+        stats.sequential_objects = len(ordered)
     output: queue.Queue = queue.Queue(maxsize=max(1, queue_parts))
     done = object()
     stopped = threading.Event()
@@ -622,9 +644,13 @@ def iter_remote_batches(
         retries_used = 0
         try:
             while next_index < len(ordered) and not stopped.is_set():
-                request_entries = ordered[
-                    next_index : next_index + object_request_size
-                ]
+                request_entries = []
+                request_bytes = 0
+                for entry in ordered[next_index:next_index + object_request_size]:
+                    if request_entries and request_bytes + entry.bytes > bundle_bytes:
+                        break
+                    request_entries.append(entry)
+                    request_bytes += entry.bytes
                 expected_index = 0
                 completed_before = next_index
 
@@ -640,6 +666,8 @@ def iter_remote_batches(
                         memory_check("remote_object_buffer")
                     buffer = io.BytesIO()
                     written = _copy_limited(source, buffer)
+                    if stats is not None:
+                        stats.transfer_bytes += written
                     if written != entry.bytes:
                         raise RuntimeError(
                             f"direct 对象字节数错误: {entry.object_id}: "
@@ -652,10 +680,14 @@ def iter_remote_batches(
                     next_index += 1
 
                 try:
+                    if stats is not None:
+                        stats.network_requests += 1
                     metrics = connection.consume_objects(
                         request_entries,
                         consume,
                     )
+                    if stats is not None:
+                        stats.queue_ms += metrics.queue_ms
                     if (
                         metrics.objects != len(request_entries)
                         or expected_index != len(request_entries)
@@ -678,6 +710,8 @@ def iter_remote_batches(
                         raise
                     connection.close()
                     retries_used += 1
+                    if stats is not None:
+                        stats.retries += 1
                     if retries_used > network_retries:
                         raise _network_failure(
                             exc,

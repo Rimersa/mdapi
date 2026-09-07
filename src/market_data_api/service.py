@@ -4,7 +4,7 @@ import contextlib
 import os
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterator
 
@@ -18,6 +18,7 @@ from .client import (
     iter_remote_batches,
 )
 from .model import DataRequest, FetchMode, LocalResources, detect_local_resources
+from .selective import MetadataCache, ReadOptions, ReadStats, iter_selective_batches
 
 ARROW_MEMORY_FACTOR = {
     "snapshots": 24,
@@ -68,6 +69,7 @@ class ServiceLimits:
     network_retries: int = 3
     network_retry_backoff: float = 0.25
     object_request_size: int = 12
+    read_options: ReadOptions = field(default_factory=ReadOptions)
 
 
 @dataclass(frozen=True)
@@ -84,6 +86,8 @@ class Preflight:
     free_disk: int
     local_cpus: int
     recommended_workers: int
+    selective: bool = False
+    stats: ReadStats = field(default_factory=ReadStats)
 
     def as_dict(self) -> dict:
         return {
@@ -102,6 +106,9 @@ class Preflight:
             "local_cpus": self.local_cpus,
             "recommended_workers": self.recommended_workers,
             "catalog_generated_at": self.selection.catalog_generated_at,
+            "read_path": "adaptive_ranges" if self.selective else "whole_objects",
+            "working_memory_estimate_kind": "per_bundle_runtime_checked" if self.selective else "largest_bucket",
+            "estimated_transfer_bytes": None if self.selective else self.missing_cache_bytes if self.cache_plan is not None else self.selection.source_bytes,
         }
 
 
@@ -174,10 +181,12 @@ class WeightedMemoryGate:
     @contextlib.contextmanager
     def acquire(self, requested: int):
         weight = min(max(1, requested), self.capacity)
-        self.slots.acquire()
+        if not self.slots.acquire(timeout=300):
+            raise TimeoutError("等待本机读取槽位超时")
         try:
             with self._condition:
-                self._condition.wait_for(lambda: self._available >= weight)
+                if not self._condition.wait_for(lambda: self._available >= weight, timeout=300):
+                    raise TimeoutError("等待本机读取内存额度超时")
                 self._available -= weight
             try:
                 yield
@@ -247,6 +256,8 @@ class DataService:
             connections=remote_connections,
         )
         self.cache = LocalCache(cache_root)
+        self.metadata_cache = MetadataCache(self.limits.read_options.metadata_cache_bytes)
+        self._cache_fill_lock = threading.Lock()
         self.resources = resources
         self.workers = local_workers
         self.remote_connections = remote_connections
@@ -284,6 +295,14 @@ class DataService:
             request.dataset,
         )
         working = _bucket_working_bytes(selection.entries, request.dataset)
+        capable = "range_bundles_v1" in selection.capabilities and "parquet_footers_v1" in selection.capabilities
+        if request.read_strategy == "ranges" and not capable:
+            raise ValueError("ranges 读取需要 0.5 或更新的服务器网关")
+        selective = (request.mode == FetchMode.DIRECT and capable and request.read_strategy != "sequential"
+                     and (request.symbols is not None or request.columns is not None or request.read_strategy == "ranges"))
+        if selective:
+            # Each actual bundle is separately estimated and admitted before allocating data buffers.
+            working = min(working, 64 * 1024**2 + 2 * self.limits.read_options.bundle_bytes)
         cache_plan = (
             self.cache.plan(request, selection.entries)
             if request.mode == FetchMode.CACHE
@@ -352,7 +371,31 @@ class DataService:
             free_disk=resources.free_disk,
             local_cpus=resources.cpus,
             recommended_workers=recommended,
+            selective=selective,
+            stats=ReadStats(source_bytes=selection.source_bytes),
         )
+
+    @contextlib.contextmanager
+    def _claim_scan_memory(self, requested):
+        resources = detect_local_resources(str(self.cache.root))
+        limit = _working_memory_limit(resources, self.limits)
+        if requested > limit:
+            raise RequestRejected("working_memory_too_large", "选中数据块的工作内存超过当前安全额度",
+                                  {"estimated_working_memory": requested, "working_memory_limit": limit})
+        with self.memory_gate.acquire(requested):
+            self._memory_monitor(_memory_reserve(resources, self.limits)).check("range_start", force=True)
+            yield
+
+    @staticmethod
+    def _count_batches(batches, stats):
+        try:
+            for batch in batches:
+                stats.returned_rows += batch.num_rows
+                yield batch
+        finally:
+            close = getattr(batches, "close", None)
+            if close is not None:
+                close()
 
     def batches(
         self,
@@ -361,10 +404,18 @@ class DataService:
     ) -> tuple[Preflight, Iterator]:
         plan = preflight or self.preflight(request)
         monitor = self._memory_monitor(plan.memory_reserve)
+        if plan.selective:
+            batches = iter_selective_batches(self.pool, request, plan.selection.entries,
+                cache=self.metadata_cache, options=self.limits.read_options, stats=plan.stats,
+                claim_memory=self._claim_scan_memory, memory_check=monitor.check,
+                batch_rows=self.limits.batch_rows, network_retries=self.limits.network_retries,
+                network_retry_backoff=self.limits.network_retry_backoff,
+                object_request_size=self.limits.object_request_size)
+            return plan, self._count_batches(batches, plan.stats)
         if request.mode == FetchMode.DIRECT:
             def direct_iterator():
-                with self.pool.connection() as connection:
-                    with self.memory_gate.acquire(plan.estimated_working_memory):
+                with self.memory_gate.acquire(plan.estimated_working_memory):
+                    with self.pool.connection() as connection:
                         monitor.check("direct_start", force=True)
                         yield from iter_remote_batches(
                             connection,
@@ -377,26 +428,25 @@ class DataService:
                                 self.limits.network_retry_backoff
                             ),
                             object_request_size=self.limits.object_request_size,
+                            stats=plan.stats,
                         )
 
-            return plan, direct_iterator()
+            return plan, self._count_batches(direct_iterator(), plan.stats)
 
         assert plan.cache_plan is not None
-        if plan.cache_plan.remote_objects:
-            with self.memory_gate.acquire(plan.estimated_working_memory):
-                monitor.check("cache_fill_start", force=True)
-                with self.pool.connection() as connection:
-                    fetch_cache_objects(
-                        connection,
-                        self.cache,
-                        plan.cache_plan.remote_objects,
-                        network_retries=self.limits.network_retries,
-                        network_retry_backoff=(
-                            self.limits.network_retry_backoff
-                        ),
-                        object_request_size=self.limits.object_request_size,
-                    )
-        cached = self.cache.selected(request)
+        with self._cache_fill_lock:
+            # Recheck after the lock: simultaneous cache misses share the completed fill.
+            current_cache_plan = self.cache.plan(request, plan.selection.entries)
+            if current_cache_plan.remote_objects:
+                with self.memory_gate.acquire(plan.estimated_working_memory):
+                    monitor.check("cache_fill_start", force=True)
+                    with self.pool.connection() as connection:
+                        fetch_cache_objects(connection, self.cache, current_cache_plan.remote_objects,
+                            network_retries=self.limits.network_retries,
+                            network_retry_backoff=self.limits.network_retry_backoff,
+                            object_request_size=self.limits.object_request_size)
+            expected = {entry.bucket_start for entry in plan.selection.entries}
+            cached = [entry for entry in self.cache.selected(request) if entry.bucket_start in expected]
         expected_buckets = {
             entry.bucket_start for entry in plan.selection.entries
         }
@@ -415,7 +465,7 @@ class DataService:
                     memory_check=monitor.check,
                 )
 
-        return plan, cache_iterator()
+        return plan, self._count_batches(cache_iterator(), plan.stats)
 
     def arrow_stream(
         self,

@@ -35,10 +35,12 @@ class FairStreamScheduler:
     opening many connections cannot move one user ahead of everybody else.
     """
 
-    def __init__(self, max_streams: int) -> None:
+    def __init__(self, max_streams: int, *, max_pending_per_user: int = 16, max_pending: int = 128) -> None:
         if max_streams < 1:
             raise ValueError("max_streams 必须 >= 1")
         self.max_streams = max_streams
+        self.max_pending_per_user = max_pending_per_user
+        self.max_pending = max_pending
         self._condition = threading.Condition()
         self._queues: dict[str, collections.deque[_Waiter]] = {}
         self._rotation: collections.deque[str] = collections.deque()
@@ -118,6 +120,9 @@ class FairStreamScheduler:
         waiter = _Waiter(user_id=user_id, queued_at=time.monotonic())
         deadline = waiter.queued_at + timeout
         with self._condition:
+            if (len(self._queues.get(user_id, ())) >= self.max_pending_per_user
+                    or sum(map(len, self._queues.values())) >= self.max_pending):
+                raise StreamQueueTimeout("远端等待队列已满，请减少并发请求后重试")
             values = self._queues.setdefault(user_id, collections.deque())
             if not values:
                 self._rotation.append(user_id)
