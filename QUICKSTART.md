@@ -1,12 +1,12 @@
-# 0.6.0rc1 安装与升级
+# 0.6.0 安装与升级
 
-当前为开发候选版，尚未部署到 87。本轮仅做隔离测试，不运行会重启正式服务的 `install-server.sh`。基座接口和测试方式见 [FLOW_POINTS.md](FLOW_POINTS.md)；以下保留后续批准部署时的安装流程。
+0.6 新增每日主动成交基座接口。读取端升级客户端即可使用已启用基座的网关；原有地址、令牌及逐笔查询方式保留。基座接口见 [FLOW_POINTS.md](FLOW_POINTS.md)。
 
 现有行情 Parquet 和 catalog v2 无需修改。要获得按股票、字段减少传输量的能力，网关和客户端都应升级。
 
 ## 87 服务器
 
-解压 `market-data-api-0.6.0rc1-easy-install.tar.gz`，进入目录：
+管理员升级服务器：解压 `market-data-api-0.6.0-easy-install.tar.gz`，进入目录。先在现有 `gateway.env` 中设置 `MDAPI_POINTS_ROOT=/data/flow_points`，然后执行：
 
 ```bash
 ./install-server.sh /data/market_data_5m
@@ -32,10 +32,20 @@
 按提示输入管理员分配的个人令牌。已有配置的升级，也可以只安装新版 wheel：
 
 ```bash
-python -m pip install --upgrade 'wheels/market_data_api-0.6.0rc1-py3-none-any.whl[client]'
+python -m pip install --upgrade 'wheels/market_data_api-0.6.0-py3-none-any.whl[client]'
 ```
 
 开始读取：
+
+```python
+from market_data_api import MarketDataClient
+
+with MarketDataClient.connect(cores=2) as api:
+    for batch in api.iter_points("2026-09-01", "2026-09-04", symbols=["000001.SZ"]):
+        print(batch.num_rows)
+```
+
+也可以继续读取原始逐笔：
 
 ```python
 from market_data_api import MarketDataClient
@@ -74,7 +84,7 @@ for batch in client.iter_batches(query):
     print(batch.num_rows)
 ```
 
-旧本机服务不支持股票过滤；升级后需要重新启动。SDK 会检查股票过滤确认信息，避免新参数被旧服务静默忽略。
+使用基座功能时，本机代理也需升级到 0.6 并重新启动；这不会改变原有逐笔请求的参数规则。SDK 会检查股票过滤确认信息，避免新参数被旧服务静默忽略。
 
 ## 可选的元数据预热
 

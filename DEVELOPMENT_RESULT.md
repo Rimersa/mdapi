@@ -1,5 +1,7 @@
 # 0.6.0rc1 开发交付
 
+本页保留候选版开发阶段记录。当前正式版为 0.6.0，用户安装与请求请看 [README.md](README.md) 和 [QUICKSTART.md](QUICKSTART.md)。
+
 开发分支：`feature/flow-points-v0.6`。本次未部署或重启 87 正式服务，主分支保持原版本。
 
 - 功能和请求：[FLOW_POINTS.md](FLOW_POINTS.md)

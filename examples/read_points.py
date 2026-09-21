@@ -1,4 +1,4 @@
-"""Run against a candidate gateway explicitly configured with --points-root."""
+"""Read daily points from a 0.6 gateway configured with --points-root."""
 
 from market_data_api import MarketDataClient
 

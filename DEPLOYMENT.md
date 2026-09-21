@@ -1,6 +1,6 @@
-# 0.6.0rc1 部署和运维
+# 0.6.0 部署和运维
 
-本版仅开发测试，87 正式服务仍为 0.5.0；本轮未执行下述安装或重启命令。
+0.6 在原网关上增加每日基座读取。升级前备份程序和配置，切换前等待正在传输的请求结束，完成后检查健康接口、原逐笔请求及基座请求。
 
 每日基座通过可选 `--points-root /data/flow_points` 或 `MDAPI_POINTS_ROOT=/data/flow_points` 启用。输入是现有 points，不需要重建 catalog 或改写 Parquet。安装配置会保留该变量，空值默认关闭。`/health` 的 `flow_points_enabled` 与 `daily_points_v1` 能力用于确认是否启用。详见 [FLOW_POINTS.md](FLOW_POINTS.md)。
 

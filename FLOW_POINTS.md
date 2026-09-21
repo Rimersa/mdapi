@@ -1,6 +1,6 @@
-# 0.6.0rc1：按日期区间流式读取主动成交基座
+# 0.6.0：按日期区间流式读取主动成交基座
 
-本版为开发候选版。正式 87 网关尚未升级，本次未部署、未重启该服务。新增接口读取已落盘的每日 `points.parquet`，返回订单级主动成交事件，不重新识别、清洗、分档或计算因子。
+新增接口读取已落盘的每日 `points.parquet`，返回订单级主动成交事件，不重新识别、清洗、分档或计算因子。正式网关地址沿用 `10.10.10.87:18787`，用户令牌保持不变；客户端需升级至 0.6。
 
 ## 默认行为与选择方式
 
@@ -17,17 +17,12 @@
 
 ## Python 请求
 
-客户端候选版本连接到已启用基座的测试网关后：
+升级客户端后，使用现有配置连接到已启用基座的网关：
 
 ```python
 from market_data_api import MarketDataClient
 
-with MarketDataClient.connect(
-    gateway_host="127.0.0.1",
-    gateway_port=18987,
-    gateway_token="dev-points",
-    cores=2,
-) as api:
+with MarketDataClient.connect(cores=2) as api:
     # 同一天，全市场，全部10列；日期首尾均包含。
     for batch in api.iter_points("2026-09-02", "2026-09-02"):
         print(batch.num_rows, batch.schema)
@@ -47,7 +42,7 @@ with MarketDataClient.connect(
     print(api.last_read_stats)
 ```
 
-正式网关以后升级并配置基座目录后，可以恢复使用已有客户端配置的 `MarketDataClient.connect(cores=2)`，用户令牌不需要因本次功能更新而更换。
+`connect()` 读取现有 `~/.config/market-data-api/client.json`。第一次使用的机器可运行发行包内的 `./install-client.sh --native 10.10.10.87`，按提示填写个人令牌。
 
 ## HTTP 请求与返回
 
@@ -90,9 +85,9 @@ order 与 price 两种口径包含同一笔成交，**不能把全表 amount/vol
 
 读取计划绑定具体文件版本。网络断开时只重取当前尚未返回的片段；已交给调用者的批次不会因内部重试重复。原排队、公平调度及 HTTP 错误处理策略保持不变，503 队列错误仍由调用者处理。取消迭代会释放连接和内存额度。
 
-## 配置与本次隔离测试
+## 配置与复现测试
 
-新增网关参数 `--points-root`，或环境变量 `MDAPI_POINTS_ROOT`。不设置即不启用基座数据集。以后 87 应配置真实根目录 `/data/flow_points`，它会自动发现 `machine=*/trade_date=*`，不依赖手动制作的静态 `flow_points_all` 链接集合；也支持根目录直接放 `trade_date=*`。同一天出现两份目录会报错。
+新增网关参数 `--points-root`，或环境变量 `MDAPI_POINTS_ROOT`。不设置即不启用基座数据集。87 使用真实根目录 `/data/flow_points`，自动发现 `machine=*/trade_date=*`，不依赖手动制作的静态 `flow_points_all` 链接集合；也支持根目录直接放 `trade_date=*`。同一天出现两份目录会报错。
 
 日期目录可通过软链接指向根目录内的不可变版本；链接不能逃到配置根目录以外。因此不要把 `/data/flow_points_all` 这个外部链接视图作为 points-root。元数据缓存必须同时位于逐笔和基座数据根目录之外。网关仍只使用 Python 标准库，CPU 解码和最终过滤在客户端完成。
 
