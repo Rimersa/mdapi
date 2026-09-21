@@ -23,6 +23,8 @@ DOCUMENTS = (
     "RELEASE_NOTES.md",
     "RANGE_PROTOCOL.md",
     "BENCHMARK_0_4.md",
+    "FLOW_POINTS.md",
+    "FLOW_POINTS_BENCHMARK.md",
 )
 PACKAGE_DIRECTORIES = ("deploy", "examples", "scripts", "benchmarks")
 ADMIN_TOOLS = (

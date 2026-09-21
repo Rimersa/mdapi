@@ -1,4 +1,6 @@
-# Market Data API 0.5.0 用户指南
+# Market Data API 0.6.0 用户指南
+
+主动成交基座的日期区间、股票/字段过滤、返回 schema 和质量信息见 [FLOW_POINTS.md](FLOW_POINTS.md)。以下原有逐笔数据用法继续适用。
 
 ## 连接与返回格式
 

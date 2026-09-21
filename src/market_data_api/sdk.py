@@ -163,3 +163,18 @@ class MarketDataClient:
                     None,
                     f"Arrow数据流中断或不完整: {exc}",
                 ) from exc
+
+    def iter_points(
+        self, start_date, end_date, *, symbols=None, columns=None, **kwargs
+    ):
+        """Stream the published daily points; both end dates are included."""
+        yield from self.iter_batches(
+            dict(
+                dataset="flow_points",
+                start_date=start_date,
+                end_date=end_date,
+                symbols=symbols,
+                columns=columns,
+                **kwargs,
+            )
+        )

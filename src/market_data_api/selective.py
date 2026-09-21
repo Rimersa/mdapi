@@ -64,6 +64,7 @@ class ReadStats:
     retries: int = 0
     queue_ms: float = 0.0
     versions: dict[str, list[str]] = field(default_factory=dict)
+    coverage: dict | None = None
 
     def as_dict(self):
         return asdict(self)
@@ -209,19 +210,26 @@ class ObjectReadPlan:
 def plan_object(entry, metadata, request, options):
     """Prune using conservative min/max statistics, then compare seek and scan cost."""
     schema = metadata.arrow.schema.to_arrow_schema()
+    if request.dataset == "flow_points" and metadata.arrow.num_rows != entry.rows:
+        raise ValueError("基座 Parquet 行数与 day.json 不一致")
     names = set(schema.names)
     if request.columns is not None and set(request.columns) - names:
         raise ValueError(f"不存在这些列: {sorted(set(request.columns) - names)}")
-    required = {"event_time"}
+    required = {request.time_column}
     if request.symbols is not None:
         required.add("symbol")
     if request.daily_start is not None:
-        required.add("time_int")
+        required.add(request.daily_column)
     if required - names:
         raise ValueError(f"Parquet 缺少过滤字段: {sorted(required - names)}")
     wanted = (set(request.columns) | required) if request.columns is not None else names
     symbols = sorted(request.symbols) if request.symbols is not None else None
-    start, end = request.start.replace(tzinfo=None), request.end.replace(tzinfo=None)
+    timezone = getattr(schema.field(request.time_column).type, "tz", None)
+    start, end = (
+        (request.start, request.end)
+        if timezone
+        else (request.start.replace(tzinfo=None), request.end.replace(tzinfo=None))
+    )
     groups, chunks, max_decoded = [], [], 0
     indexes = {}
     if metadata.arrow.num_row_groups:
@@ -236,7 +244,12 @@ def plan_object(entry, metadata, request, options):
     for i in range(metadata.arrow.num_row_groups):
         group = metadata.arrow.row_group(i)
         keep = True
-        for name in ("symbol", "event_time"):
+        for name in (
+            ()
+            if request.dataset == "flow_points"
+            and request.read_strategy == "sequential"
+            else ("symbol", request.time_column)
+        ):
             col = group.column(indexes[name]) if name in indexes else None
             st = col.statistics if col is not None else None
             if st is None or not st.has_min_max:
@@ -249,7 +262,7 @@ def plan_object(entry, metadata, request, options):
                     position = bisect.bisect_left(symbols, low)
                     if position == len(symbols) or symbols[position] > high:
                         keep = False
-                elif name == "event_time" and (high < start or low >= end):
+                elif name == request.time_column and (high < start or low >= end):
                     keep = False
             except (TypeError, ValueError, UnicodeError):
                 pass  # Unknown statistics must never exclude potentially matching rows.
@@ -274,11 +287,15 @@ def plan_object(entry, metadata, request, options):
         max_decoded = max(max_decoded, decoded)
     ranges = coalesce_ranges(chunks, options.coalesce_gap_bytes)
     cost = sum(n for _, n in ranges) + max(0, len(ranges) - 1) * options.seek_cost_bytes
-    sequential = bool(ranges) and (
-        len(ranges) > 4096
-        or (
-            request.read_strategy == "auto"
-            and cost >= entry.bytes * options.sequential_threshold
+    sequential = (
+        request.dataset != "flow_points"
+        and bool(ranges)
+        and (
+            len(ranges) > 4096
+            or (
+                request.read_strategy == "auto"
+                and cost >= entry.bytes * options.sequential_threshold
+            )
         )
     )
     if sequential:
@@ -286,6 +303,63 @@ def plan_object(entry, metadata, request, options):
     return ObjectReadPlan(
         entry, metadata, tuple(groups), ranges, max_decoded, sequential
     )
+
+
+def split_points_plan(plan, request, options):
+    """Keep a daily file in row-group-sized network leases, without rewriting it."""
+    schema = plan.metadata.arrow.schema.to_arrow_schema()
+    required = {request.time_column}
+    if request.symbols is not None:
+        required.add("symbol")
+    if request.daily_start is not None:
+        required.add(request.daily_column)
+    wanted = (
+        (set(request.columns) | required)
+        if request.columns is not None
+        else set(schema.names)
+    )
+    if request.read_strategy == "sequential":
+        wanted = set(schema.names)
+    groups, chunks, max_decoded = [], [], 0
+    for index in plan.row_groups:
+        group = plan.metadata.arrow.row_group(index)
+        next_chunks, decoded = [], 0
+        for j in range(group.num_columns):
+            col = group.column(j)
+            if col.path_in_schema not in wanted:
+                continue
+            offsets = [
+                v
+                for v in (col.dictionary_page_offset, col.data_page_offset)
+                if v is not None and v >= 4
+            ]
+            next_chunks.append((min(offsets), col.total_compressed_size))
+            decoded += col.total_uncompressed_size
+        combined = coalesce_ranges(chunks + next_chunks, options.coalesce_gap_bytes)
+        if groups and (
+            sum(n for _, n in combined) > options.bundle_bytes or len(combined) > 4096
+        ):
+            yield ObjectReadPlan(
+                plan.entry,
+                plan.metadata,
+                tuple(groups),
+                coalesce_ranges(chunks, options.coalesce_gap_bytes),
+                max_decoded,
+                False,
+            )
+            groups, chunks, max_decoded = [], [], 0
+        groups.append(index)
+        chunks.extend(next_chunks)
+        max_decoded = max(max_decoded, decoded)
+    if groups:
+        yield ObjectReadPlan(
+            plan.entry,
+            plan.metadata,
+            tuple(groups),
+            coalesce_ranges(chunks, options.coalesce_gap_bytes),
+            max_decoded,
+            False,
+        )
 
 
 class SparseFile(io.RawIOBase):
@@ -448,6 +522,36 @@ def iter_selective_batches(
         ]
         active = []
         for plan in plans:
+            if request.dataset == "flow_points" and plan.row_groups:
+                for part in split_points_plan(plan, request, options):
+                    stats.planned_bytes += part.transfer_bytes
+                    stats.range_count += len(part.ranges)
+                    working = (
+                        2 * part.transfer_bytes
+                        + 4 * part.max_row_group_bytes
+                        + 32 * 1024**2
+                    )
+                    with claim_memory(working):
+                        buffers = _fetch_plans(
+                            pool,
+                            [part],
+                            stats,
+                            network_retries,
+                            network_retry_backoff,
+                            memory_check,
+                        )
+                        try:
+                            yield from _iter_filtered_batches_from_parquet(
+                                buffers[0],
+                                request,
+                                batch_rows=batch_rows,
+                                memory_check=memory_check,
+                                metadata=part.metadata.arrow,
+                                row_groups=list(part.row_groups),
+                            )
+                        finally:
+                            buffers[0].close()
+                continue
             stats.planned_bytes += plan.transfer_bytes
             stats.range_count += len(plan.ranges)
             stats.sequential_objects += int(plan.sequential)
@@ -503,7 +607,9 @@ def iter_selective_batches(
                         buffer.close()
             first = last
 
-    width = min(12, max(1, object_request_size))
+    width = (
+        1 if request.dataset == "flow_points" else min(12, max(1, object_request_size))
+    )
     for offset in range(0, len(entries), width):
         try:
             yield from window_batches(entries[offset : offset + width])

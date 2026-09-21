@@ -1,19 +1,44 @@
-# Market Data API 0.5.0
+# Market Data API 0.6.0
 
-按日期、时间、股票和字段读取远端逐笔数据，默认逐批返回，不在用户机器保存行情文件。
-**现有五分钟 Parquet 和 catalog v2 可直接使用，无需改写、重切或迁移数据。**
+通过同一客户端读取逐笔行情和已生成的主动成交基座，按批返回 Arrow 数据，支持日期、股票和字段筛选。默认不在客户端保存行情文件。
 
-0.5 新增股票过滤、行组和列块按需读取、机械盘成本选择、压缩元数据缓存，以及可直接连接网关的 Python 客户端。
+0.6 新增 **`flow_points`**：按日期区间读取每日主动成交事件，默认全市场、全部 10 列；不会重新识别、清洗或计算因子。整日文件按行组分段传输，股票与字段过滤尽量减少读取量，长区间逐批消费。
+
+| 数据集 | 返回内容 | 时间范围 |
+|---|---|---|
+| `flow_points` | 已识别、分档的主动成交事件原表 | 日期首尾包含，默认全天，可选每日时间窗口 |
+| `orders` / `trades` / `snapshots` | 原委托、成交、快照 | `start/end` 半开区间；按日期请求时需提供每日窗口 |
+
+原三类逐笔接口保持兼容；现有 Parquet、catalog v2 和基座文件均直接只读使用，无需重切数据。服务地址继续使用 `10.10.10.87:18787`，现有用户配置和令牌保留。
 
 ## 快速使用
 
 在自己的 Python / Conda 环境安装发行包里的客户端：
 
 ```bash
-python -m pip install 'wheels/market_data_api-0.5.0-py3-none-any.whl[client]'
+python -m pip install --upgrade 'wheels/market_data_api-0.6.0-py3-none-any.whl[client]'
 ```
 
-已有客户端配置时：
+已有客户端配置时，直接读取基座：
+
+```python
+from market_data_api import MarketDataClient
+
+with MarketDataClient.connect(cores=2) as api:
+    for batch in api.iter_points(
+        "2026-09-01", "2026-09-04",  # 包含首尾日期
+        symbols=["000001.SZ", "600000.SH"],  # 省略即全市场
+        columns=["symbol", "time", "amount", "volume"],  # 省略即全部10列
+    ):
+        print(batch.num_rows)
+    print(api.last_read_stats["coverage"])
+```
+
+仍可使用 `iter_batches({"dataset": "flow_points", "start_date": ..., "end_date": ...})`。`read_table()` 会在内存中收齐结果，大区间应使用迭代器。
+
+基座返回 `symbol、time、active_order_id、side、depth、mode_mask、amount、volume、order_amount、order_volume`。order 口径取 `mode_mask=1/3`，price 取 `2/3`，两种口径不能直接混加。缺日与 partial 随覆盖信息报告，已有有效事件照常返回。完整契约见 [FLOW_POINTS.md](FLOW_POINTS.md)。
+
+原来的逐笔请求方式保持不变：
 
 ```python
 from market_data_api import MarketDataClient
@@ -33,13 +58,13 @@ with MarketDataClient.connect() as client:
 
 `connect()` 读取 `~/.config/market-data-api/client.json`，复用到网关的 HTTP 连接，无需启动本机 FastAPI。新安装可运行 `./install-client.sh --native 10.10.10.87`，按提示输入个人令牌。
 
-原来 `MarketDataClient()` → 本机 FastAPI 的调用方式仍然保留。使用股票过滤时，本机服务也必须升级到 0.5；新版 SDK 会拒绝没有确认股票过滤的旧服务响应。
+原来 `MarketDataClient()` → 本机 FastAPI 的调用方式仍然保留。使用基座接口时，将客户端及本机代理升级到 0.6；原有逐笔调用无需改写。
 
 ## 读取逻辑
 
 ```text
 日期、时间、股票、字段
-  → catalog 确定不可变对象版本
+  → 逐笔 catalog / 基座日文件收据确定对象版本
   → 元数据判断需要的行组与列块
   → 合并相邻字节段，比较随机读与顺序读成本
   → 87 发送相关压缩字节，或采用整文件顺序传输
@@ -57,9 +82,9 @@ with MarketDataClient.connect() as client:
 
 | 参数 | 含义 |
 |---|---|
-| `dataset` | `orders`、`trades`、`snapshots` |
+| `dataset` | `orders`、`trades`、`snapshots`、可选启用的 `flow_points` |
 | `start` / `end` | 上海时区的 `[start, end)`，支持 ISO-8601 时区 |
-| `start_date` / `end_date` | 包含首尾日期，需同时提供每日窗口；与 start/end 二选一 |
+| `start_date` / `end_date` | 包含首尾日期；逐笔数据需提供每日窗口，flow_points 默认全天；与 start/end 二选一 |
 | `daily_start` / `daily_end` | 每天相同的半开时间窗口 |
 | `symbols` | 精确股票代码数组；省略表示全部；空数组报错 |
 | `columns` | 返回字段及顺序；省略表示全部 |
@@ -87,6 +112,8 @@ client = MarketDataClient.connect(
 ## 文档与验证
 
 - [快速安装和升级](QUICKSTART.md)
+- [主动成交基座接口与返回字段](FLOW_POINTS.md)
+- [基座真实数据测试结果](FLOW_POINTS_BENCHMARK.md)
 - [完整用户指南](USER_GUIDE.md)
 - [服务器部署](DEPLOYMENT.md)
 - [数据文件格式](SERVER_DATA_FORMAT.md)

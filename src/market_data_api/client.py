@@ -66,6 +66,7 @@ class Selection:
     rows: int
     catalog_generated_at: str
     capabilities: tuple[str, ...] = ()
+    coverage: dict | None = None
 
 
 class LimitedReader:
@@ -183,6 +184,7 @@ class GatewayConnection:
             rows=int(summary["rows"]),
             catalog_generated_at=str(payload["catalog_generated_at"]),
             capabilities=tuple(payload.get("capabilities", ())),
+            coverage=payload.get("coverage"),
         )
 
     def _consume_response(
@@ -545,18 +547,23 @@ def _iter_filtered_batches_from_parquet(
             if missing:
                 raise ValueError(f"不存在这些列: {missing}")
             columns = list(request.columns)
-            if "event_time" not in columns:
-                columns.append("event_time")
-            if request.daily_start is not None and "time_int" not in columns:
-                columns.append("time_int")
+            if request.time_column not in columns:
+                columns.append(request.time_column)
+            if request.daily_start is not None and request.daily_column not in columns:
+                columns.append(request.daily_column)
             if request.symbols is not None and "symbol" not in columns:
                 columns.append("symbol")
         else:
             columns = None
-        start = request.start.replace(tzinfo=None)
-        end = request.end.replace(tzinfo=None)
-        start_scalar = pa.scalar(start, type=pa.timestamp("us"))
-        end_scalar = pa.scalar(end, type=pa.timestamp("us"))
+        if request.time_column not in schema_names:
+            raise ValueError(f"源数据缺少事件时间列 {request.time_column}")
+        time_type = parquet.schema_arrow.field(request.time_column).type
+        if not pa.types.is_timestamp(time_type):
+            raise ValueError("事件时间列必须是 timestamp")
+        start = request.start if time_type.tz else request.start.replace(tzinfo=None)
+        end = request.end if time_type.tz else request.end.replace(tzinfo=None)
+        start_scalar = pa.scalar(start, type=time_type)
+        end_scalar = pa.scalar(end, type=time_type)
         had_rows = False
         for batch in parquet.iter_batches(
             batch_size=batch_rows,
@@ -566,15 +573,17 @@ def _iter_filtered_batches_from_parquet(
         ):
             if memory_check is not None:
                 memory_check("parquet_batch")
-            event_time = batch.column(batch.schema.get_field_index("event_time"))
+            event_time = batch.column(batch.schema.get_field_index(request.time_column))
             mask = pc.and_(
                 pc.greater_equal(event_time, start_scalar),
                 pc.less(event_time, end_scalar),
             )
             if request.daily_start is not None:
-                if "time_int" not in batch.schema.names:
+                if request.daily_column not in batch.schema.names:
                     raise ValueError("源数据缺少每日窗口过滤所需的 time_int")
-                time_int = batch.column(batch.schema.get_field_index("time_int"))
+                time_int = batch.column(
+                    batch.schema.get_field_index(request.daily_column)
+                )
 
                 def encoded(value) -> int:
                     return (
@@ -584,10 +593,26 @@ def _iter_filtered_batches_from_parquet(
                         + value.microsecond // 1_000
                     )
 
-                daily = pc.and_(
-                    pc.greater_equal(time_int, encoded(request.daily_start)),
-                    pc.less(time_int, encoded(request.daily_end)),
-                )
+                if request.dataset == "flow_points":
+                    local_time = (
+                        pc.local_timestamp(time_int) if time_type.tz else time_int
+                    )
+                    time_of_day = pc.cast(local_time, pa.time64("ns"))
+                    daily = pc.and_(
+                        pc.greater_equal(
+                            time_of_day,
+                            pa.scalar(request.daily_start, type=pa.time64("ns")),
+                        ),
+                        pc.less(
+                            time_of_day,
+                            pa.scalar(request.daily_end, type=pa.time64("ns")),
+                        ),
+                    )
+                else:
+                    daily = pc.and_(
+                        pc.greater_equal(time_int, encoded(request.daily_start)),
+                        pc.less(time_int, encoded(request.daily_end)),
+                    )
                 mask = pc.and_(mask, daily)
             if request.symbols is not None:
                 symbols = batch.column(batch.schema.get_field_index("symbol"))

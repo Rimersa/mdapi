@@ -1,0 +1,30 @@
+{
+  "version": "0.6.0rc1",
+  "branch": "feature/flow-points-v0.6",
+  "baseline_commit": "746f0037b66a6da99873b66bb2afa35386e8cbc9",
+  "full_suite": {
+    "python": "3.13",
+    "passed": 63,
+    "warnings": 2
+  },
+  "python310_points": {
+    "passed": 14,
+    "deselected": 1,
+    "reason": "FastAPI optional dependency unavailable in that interpreter; HTTP proxy covered by full suite"
+  },
+  "package_smoke": {
+    "version": "0.6.0rc1",
+    "client_imported_from_wheel": true,
+    "packaged_gateway_started": true,
+    "rows": 49678,
+    "expected_rows": 49678,
+    "gateway_stopped": true,
+    "gateway_sha256": "40d2a20b65deaafd5adb0bf041e9bf25ca10d91bf0d69be8da1eb74f88dbae26",
+    "wheel_sha256": "fe6d4e7e8d4201376d927feae8fce8c39938a80a541f0fac8c27930c0e58fcb9"
+  },
+  "archive": "market-data-api-0.6.0rc1-easy-install.tar.gz",
+  "archive_sha256": "1d525fb1c654a62627ca64dab7048b49cb5b8bbdeb82ed3ff4c13dc962fac29c",
+  "production_deployment_performed": false,
+  "production_restart_performed": false,
+  "performance": "points_20260921.json"
+}

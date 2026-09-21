@@ -12,6 +12,7 @@ def main():
         "MDAPI_MAX_STREAMS": "2",
         "MDAPI_QUEUE_TIMEOUT": "300",
         "MDAPI_METADATA_INDEX": metadata_index,
+        "MDAPI_POINTS_ROOT": "",
     }
     old = Path(previous)
     if old.exists():
@@ -24,6 +25,10 @@ def main():
     index_path = Path(values["MDAPI_METADATA_INDEX"]).expanduser().resolve()
     if index_path.is_relative_to(Path(data_root).resolve()):
         raise ValueError("元数据缓存不能位于行情数据根目录内")
+    if values["MDAPI_POINTS_ROOT"] and index_path.is_relative_to(
+        Path(values["MDAPI_POINTS_ROOT"]).expanduser().resolve()
+    ):
+        raise ValueError("元数据缓存不能位于基座数据根目录内")
     if any("\n" in value or "\r" in value for value in values.values()):
         raise ValueError("配置值不能包含换行符")
     Path(output).write_text(
