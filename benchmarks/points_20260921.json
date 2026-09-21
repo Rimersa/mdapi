@@ -1,0 +1,255 @@
+{
+  "kind": "local-loopback-real-files",
+  "source_files": {
+    "/home/quant/active_trade/validation/partial_20240202/original_api32/machine=local/trade_date=2024-02-02/points.parquet": [
+      2788620,
+      747568876,
+      1789889582969801998
+    ],
+    "/home/quant/active_trade/validation/points_migration/full_market_points/machine=source/trade_date=2026-09-02/points.parquet": [
+      2782698,
+      973220328,
+      1789877704635686195
+    ]
+  },
+  "python": "3.13.11 | packaged by Anaconda, Inc. | (main, Dec 10 2025, 21:28:48) [GCC 14.3.0]",
+  "cores": 2,
+  "cache_note": "OS cache not cleared; one fresh client process per case",
+  "only_these_dates_mounted": [
+    "2024-02-02",
+    "2026-09-02"
+  ],
+  "sources_unchanged": true,
+  "server_stopped": true,
+  "results": [
+    {
+      "query": {
+        "dataset": "flow_points",
+        "start_date": "2026-09-02",
+        "end_date": "2026-09-02"
+      },
+      "seconds": 20.578483526594937,
+      "first_batch_seconds": 0.7558729136362672,
+      "rows": 80267316,
+      "arrow_bytes": 5478244366,
+      "volume_sequence_sha256": "ec31bb646128bf95221113f40a6e8ce20af8d165621b4d2976ec8a0b86921d49",
+      "peak_rss_bytes": {
+        "client": 378146816,
+        "gateway": 31391744
+      },
+      "stats": {
+        "source_bytes": 973220328,
+        "metadata_bytes": 282478,
+        "transfer_bytes": 972366389,
+        "planned_bytes": 972366389,
+        "range_count": 61,
+        "skipped_objects": 0,
+        "sequential_objects": 0,
+        "returned_rows": 80267316,
+        "network_requests": 62,
+        "retries": 0,
+        "queue_ms": 2.906,
+        "versions": {
+          "2026-09-02": [
+            "005e1f5c38a7281acc42da7431f9ead7cfc0b173a341537248f02a0b8cccd27b"
+          ]
+        },
+        "coverage_dates": [
+          "2026-09-02"
+        ],
+        "dates_without_files_count": 0
+      },
+      "case": "full_market_one_day",
+      "oracle_equal": true
+    },
+    {
+      "query": {
+        "dataset": "flow_points",
+        "start_date": "2026-09-02",
+        "end_date": "2026-09-02",
+        "symbols": [
+          "000001.SZ"
+        ]
+      },
+      "seconds": 1.8502071043476462,
+      "first_batch_seconds": 0.7167374920099974,
+      "rows": 49678,
+      "arrow_bytes": 3390566,
+      "volume_sequence_sha256": "bb0bf6f75cf9a8a11d40f469af8f63aa37da95fbfe5642e3851812cc468bb1fa",
+      "peak_rss_bytes": {
+        "client": 197537792,
+        "gateway": 31383552
+      },
+      "stats": {
+        "source_bytes": 973220328,
+        "metadata_bytes": 282478,
+        "transfer_bytes": 77011375,
+        "planned_bytes": 77011375,
+        "range_count": 48,
+        "skipped_objects": 0,
+        "sequential_objects": 0,
+        "returned_rows": 49678,
+        "network_requests": 6,
+        "retries": 0,
+        "queue_ms": 0.312,
+        "versions": {
+          "2026-09-02": [
+            "005e1f5c38a7281acc42da7431f9ead7cfc0b173a341537248f02a0b8cccd27b"
+          ]
+        },
+        "coverage_dates": [
+          "2026-09-02"
+        ],
+        "dates_without_files_count": 0
+      },
+      "case": "one_stock",
+      "oracle_equal": true
+    },
+    {
+      "query": {
+        "dataset": "flow_points",
+        "start_date": "2026-09-02",
+        "end_date": "2026-09-02",
+        "symbols": [
+          "000001.SZ"
+        ],
+        "read_strategy": "sequential"
+      },
+      "seconds": 13.55565266404301,
+      "first_batch_seconds": 0.5168222468346357,
+      "rows": 49678,
+      "arrow_bytes": 3390566,
+      "volume_sequence_sha256": "bb0bf6f75cf9a8a11d40f469af8f63aa37da95fbfe5642e3851812cc468bb1fa",
+      "peak_rss_bytes": {
+        "client": 325988352,
+        "gateway": 31350784
+      },
+      "stats": {
+        "source_bytes": 973220328,
+        "metadata_bytes": 282478,
+        "transfer_bytes": 972366389,
+        "planned_bytes": 972366389,
+        "range_count": 61,
+        "skipped_objects": 0,
+        "sequential_objects": 0,
+        "returned_rows": 49678,
+        "network_requests": 62,
+        "retries": 0,
+        "queue_ms": 2.794999999999999,
+        "versions": {
+          "2026-09-02": [
+            "005e1f5c38a7281acc42da7431f9ead7cfc0b173a341537248f02a0b8cccd27b"
+          ]
+        },
+        "coverage_dates": [
+          "2026-09-02"
+        ],
+        "dates_without_files_count": 0
+      },
+      "case": "one_stock_sequential",
+      "oracle_equal": true
+    },
+    {
+      "query": {
+        "dataset": "flow_points",
+        "start_date": "2026-09-02",
+        "end_date": "2026-09-02",
+        "symbols": [
+          "000001.SZ",
+          "000002.SZ",
+          "000333.SZ",
+          "000651.SZ",
+          "000858.SZ",
+          "002594.SZ",
+          "600000.SH",
+          "600036.SH",
+          "600519.SH",
+          "601318.SH"
+        ],
+        "columns": [
+          "symbol",
+          "time",
+          "amount",
+          "volume"
+        ]
+      },
+      "seconds": 4.096940129995346,
+      "first_batch_seconds": 0.6931276796385646,
+      "rows": 444141,
+      "arrow_bytes": 16488831,
+      "volume_sequence_sha256": "8c8723f2905c50a20acbd3899f1fa02bf56a46bef14ae49ac5e46d6fd5291914",
+      "peak_rss_bytes": {
+        "client": 221868032,
+        "gateway": 30883840
+      },
+      "stats": {
+        "source_bytes": 973220328,
+        "metadata_bytes": 282478,
+        "transfer_bytes": 276783752,
+        "planned_bytes": 276783752,
+        "range_count": 192,
+        "skipped_objects": 0,
+        "sequential_objects": 0,
+        "returned_rows": 444141,
+        "network_requests": 18,
+        "retries": 0,
+        "queue_ms": 0.6230000000000001,
+        "versions": {
+          "2026-09-02": [
+            "005e1f5c38a7281acc42da7431f9ead7cfc0b173a341537248f02a0b8cccd27b"
+          ]
+        },
+        "coverage_dates": [
+          "2026-09-02"
+        ],
+        "dates_without_files_count": 0
+      },
+      "case": "ten_stocks_four_columns",
+      "oracle_equal": true
+    },
+    {
+      "query": {
+        "dataset": "flow_points",
+        "start_date": "2024-02-02",
+        "end_date": "2026-09-02"
+      },
+      "seconds": 27.156418967992067,
+      "first_batch_seconds": 0.6576198367401958,
+      "rows": 143158079,
+      "arrow_bytes": 9770538970,
+      "volume_sequence_sha256": "1b4dadf8b26b01c6ccd26f3f93fa9f17379bf303d90d23d48b50e0e14b1262c1",
+      "peak_rss_bytes": {
+        "client": 358789120,
+        "gateway": 31944704
+      },
+      "stats": {
+        "source_bytes": 1720789204,
+        "metadata_bytes": 428508,
+        "transfer_bytes": 1719416939,
+        "planned_bytes": 1719416939,
+        "range_count": 108,
+        "skipped_objects": 0,
+        "sequential_objects": 0,
+        "returned_rows": 143158079,
+        "network_requests": 110,
+        "retries": 0,
+        "queue_ms": 3.2820000000000005,
+        "versions": {
+          "2024-02-02": [
+            "0723d85cd080cd5a85cfb30c63ac1307c7a3262b896da5c9a668bb817bfedacd"
+          ],
+          "2026-09-02": [
+            "005e1f5c38a7281acc42da7431f9ead7cfc0b173a341537248f02a0b8cccd27b"
+          ]
+        },
+        "coverage_dates": [
+          "2024-02-02",
+          "2026-09-02"
+        ],
+        "dates_without_files_count": 942
+      },
+      "case": "full_market_two_files",
+      "oracle_equal": true
+    }
+  ]
+}

@@ -1,4 +1,6 @@
-# Market Data API 0.5.0
+# Market Data API 0.6.0rc1
+
+开发候选版新增 `flow_points`：按日期区间读取已落盘的主动成交事件基座，默认全市场，可选股票和字段；按行组分段传输并返回 Arrow 批次。正式服务尚未部署本版。请求示例、10 列返回结构、缺日/partial 说明见 [FLOW_POINTS.md](FLOW_POINTS.md)，实测见 [FLOW_POINTS_BENCHMARK.md](FLOW_POINTS_BENCHMARK.md)。原三类逐笔数据接口保持兼容。
 
 按日期、时间、股票和字段读取远端逐笔数据，默认逐批返回，不在用户机器保存行情文件。
 **现有五分钟 Parquet 和 catalog v2 可直接使用，无需改写、重切或迁移数据。**
@@ -10,7 +12,7 @@
 在自己的 Python / Conda 环境安装发行包里的客户端：
 
 ```bash
-python -m pip install 'wheels/market_data_api-0.5.0-py3-none-any.whl[client]'
+python -m pip install 'wheels/market_data_api-0.6.0rc1-py3-none-any.whl[client]'
 ```
 
 已有客户端配置时：
@@ -57,9 +59,9 @@ with MarketDataClient.connect() as client:
 
 | 参数 | 含义 |
 |---|---|
-| `dataset` | `orders`、`trades`、`snapshots` |
+| `dataset` | `orders`、`trades`、`snapshots`、可选启用的 `flow_points` |
 | `start` / `end` | 上海时区的 `[start, end)`，支持 ISO-8601 时区 |
-| `start_date` / `end_date` | 包含首尾日期，需同时提供每日窗口；与 start/end 二选一 |
+| `start_date` / `end_date` | 包含首尾日期；逐笔数据需提供每日窗口，flow_points 默认全天；与 start/end 二选一 |
 | `daily_start` / `daily_end` | 每天相同的半开时间窗口 |
 | `symbols` | 精确股票代码数组；省略表示全部；空数组报错 |
 | `columns` | 返回字段及顺序；省略表示全部 |

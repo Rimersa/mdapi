@@ -177,6 +177,7 @@ class RemoteMarketDataClient:
                 request = DataRequest.from_query(query)
                 plan = self.service.preflight(request)
                 self._local.stats = plan.stats
+                plan.stats.coverage = plan.selection.coverage
                 _, batches = self.service.batches(request, plan)
                 yield from batches
             finally:
@@ -203,6 +204,21 @@ class RemoteMarketDataClient:
     def read_table(self, query):
         with self.open_stream(query) as reader:
             return reader.read_all()
+
+    def iter_points(
+        self, start_date, end_date, *, symbols=None, columns=None, **kwargs
+    ):
+        """Inclusive dates; all observed market points unless symbols are supplied."""
+        yield from self.iter_batches(
+            dict(
+                dataset="flow_points",
+                start_date=start_date,
+                end_date=end_date,
+                symbols=symbols,
+                columns=columns,
+                **kwargs,
+            )
+        )
 
     def close(self):
         if not self._closed:

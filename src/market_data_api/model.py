@@ -6,7 +6,9 @@ from dataclasses import dataclass
 from enum import Enum
 from zoneinfo import ZoneInfo
 
+# Persisted tick catalogs and their builders retain the original three datasets.
 DATASETS = ("orders", "trades", "snapshots")
+REQUEST_DATASETS = DATASETS + ("flow_points",)
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 BUCKET_SECONDS = 300
 
@@ -86,8 +88,8 @@ class DataRequest:
     read_strategy: str = "auto"
 
     def __post_init__(self) -> None:
-        if self.dataset not in DATASETS:
-            raise ValueError(f"未知数据集 {self.dataset!r}；可选 {DATASETS}")
+        if self.dataset not in REQUEST_DATASETS:
+            raise ValueError(f"未知数据集 {self.dataset!r}；可选 {REQUEST_DATASETS}")
         start = parse_datetime(self.start)
         end = parse_datetime(self.end)
         if end <= start:
@@ -96,6 +98,8 @@ class DataRequest:
         object.__setattr__(self, "end", end)
         object.__setattr__(self, "mode", FetchMode(self.mode))
         object.__setattr__(self, "update", UpdateMode(self.update))
+        if self.dataset == "flow_points" and self.mode != FetchMode.DIRECT:
+            raise ValueError("flow_points 使用 direct 分批读取，不启用整日文件本地缓存")
         daily_start = parse_daily_time(self.daily_start)
         daily_end = parse_daily_time(self.daily_end)
         if (daily_start is None) != (daily_end is None):
@@ -128,6 +132,14 @@ class DataRequest:
         if self.mode == FetchMode.CACHE and self.read_strategy == "ranges":
             raise ValueError("ranges 只适用于 direct；cache 模式缓存完整对象")
 
+    @property
+    def time_column(self):
+        return "time" if self.dataset == "flow_points" else "event_time"
+
+    @property
+    def daily_column(self):
+        return "time" if self.dataset == "flow_points" else "time_int"
+
     @classmethod
     def from_values(
         cls,
@@ -149,7 +161,7 @@ class DataRequest:
             end=parse_datetime(end),
             mode=FetchMode(mode),
             update=UpdateMode(update),
-            columns=tuple(columns) if columns is not None else None,
+            columns=columns,
             daily_start=parse_daily_time(daily_start),
             daily_end=parse_daily_time(daily_end),
             symbols=symbols,
@@ -204,8 +216,10 @@ class DataRequest:
             if (
                 first is None
                 or last is None
-                or not raw.get("daily_start")
-                or not raw.get("daily_end")
+                or (
+                    raw["dataset"] != "flow_points"
+                    and (not raw.get("daily_start") or not raw.get("daily_end"))
+                )
             ):
                 raise ValueError(
                     "日期区间模式需要 start_date/end_date 和 daily_start/daily_end"

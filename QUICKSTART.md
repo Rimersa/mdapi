@@ -1,10 +1,12 @@
-# 0.5.0 安装与升级
+# 0.6.0rc1 安装与升级
+
+当前为开发候选版，尚未部署到 87。本轮仅做隔离测试，不运行会重启正式服务的 `install-server.sh`。基座接口和测试方式见 [FLOW_POINTS.md](FLOW_POINTS.md)；以下保留后续批准部署时的安装流程。
 
 现有行情 Parquet 和 catalog v2 无需修改。要获得按股票、字段减少传输量的能力，网关和客户端都应升级。
 
 ## 87 服务器
 
-解压 `market-data-api-0.5.0-easy-install.tar.gz`，进入目录：
+解压 `market-data-api-0.6.0rc1-easy-install.tar.gz`，进入目录：
 
 ```bash
 ./install-server.sh /data/market_data_5m
@@ -30,7 +32,7 @@
 按提示输入管理员分配的个人令牌。已有配置的升级，也可以只安装新版 wheel：
 
 ```bash
-python -m pip install --upgrade 'wheels/market_data_api-0.5.0-py3-none-any.whl[client]'
+python -m pip install --upgrade 'wheels/market_data_api-0.6.0rc1-py3-none-any.whl[client]'
 ```
 
 开始读取：

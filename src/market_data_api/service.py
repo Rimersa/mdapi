@@ -24,6 +24,7 @@ ARROW_MEMORY_FACTOR = {
     "snapshots": 24,
     "orders": 16,
     "trades": 10,
+    "flow_points": 10,
 }
 
 
@@ -117,6 +118,7 @@ class Preflight:
             "catalog_generated_at": self.selection.catalog_generated_at,
             "read_path": "adaptive_ranges" if self.selective else "whole_objects",
             "symbols_supported": True,
+            "coverage": self.selection.coverage,
             "working_memory_estimate_kind": "per_bundle_runtime_checked"
             if self.selective
             else "largest_bucket",
@@ -313,16 +315,22 @@ class DataService:
             "range_bundles_v1" in selection.capabilities
             and "parquet_footers_v1" in selection.capabilities
         )
-        if request.read_strategy == "ranges" and not capable:
+        if (
+            request.read_strategy == "ranges" or request.dataset == "flow_points"
+        ) and not capable:
             raise ValueError("ranges 读取需要 0.5 或更新的服务器网关")
         selective = (
             request.mode == FetchMode.DIRECT
             and capable
-            and request.read_strategy != "sequential"
+            and (
+                request.read_strategy != "sequential"
+                or request.dataset == "flow_points"
+            )
             and (
                 request.symbols is not None
                 or request.columns is not None
                 or request.read_strategy == "ranges"
+                or request.dataset == "flow_points"
             )
         )
         if selective:
@@ -400,6 +408,7 @@ class DataService:
             stats=ReadStats(
                 source_bytes=selection.source_bytes,
                 versions=_version_map(selection.entries),
+                coverage=selection.coverage,
             ),
         )
 
@@ -544,14 +553,27 @@ def _arrow_ipc_pipe(
         try:
             first = next(batches)
             options = pa.ipc.IpcWriteOptions(compression=compression)
-            with pa.ipc.new_stream(
+            writer = pa.ipc.new_stream(
                 write_file,
                 first.schema,
                 options=options,
-            ) as writer:
+            )
+            try:
                 writer.write_batch(first)
                 for batch in batches:
                     writer.write_batch(batch)
+            except BaseException:
+                # An exception must not write a successful Arrow end marker.
+                # Otherwise a client can stop at that marker before detecting
+                # the subsequently truncated HTTP response.
+                write_file.close()
+                try:
+                    writer.close()
+                except Exception:
+                    pass
+                raise
+            else:
+                writer.close()
         except StopIteration:
             errors.append(NoData("精确时间过滤后没有数据行"))
         except BaseException as exc:

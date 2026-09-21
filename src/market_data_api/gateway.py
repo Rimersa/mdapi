@@ -20,6 +20,7 @@ from .catalog import CatalogStore, ObjectEntry, manifest_summary
 from .model import DataRequest
 from .protocol import BUNDLE_MAGIC, encode_bundle_end, encode_part_header
 from .scheduler import FairStreamScheduler, StreamQueueTimeout
+from .points import PointsStore
 from .range_gateway import (
     CAPABILITIES,
     FooterCache,
@@ -56,9 +57,13 @@ class GatewayState:
         max_objects: int,
         queue_timeout: float,
         metadata_index: Path | None = None,
+        points_root: Path | None = None,
     ) -> None:
         self.root = root.resolve(strict=True)
         self.catalog_store = CatalogStore(self.root)
+        self.points_store = (
+            PointsStore(points_root) if points_root is not None else None
+        )
         self.token = token
         self.user_tokens = dict(user_tokens or {})
         self.auth_required = auth_required
@@ -75,6 +80,10 @@ class GatewayState:
             metadata_index = metadata_index.expanduser().resolve()
             if metadata_index.is_relative_to(self.root):
                 raise ValueError("元数据缓存必须位于行情数据根目录之外")
+            if self.points_store and metadata_index.is_relative_to(
+                self.points_store.root
+            ):
+                raise ValueError("元数据缓存必须位于基座数据根目录之外")
         self.footer_cache = FooterCache(
             store=FooterStore(metadata_index) if metadata_index is not None else None
         )
@@ -99,6 +108,10 @@ class GatewayState:
                 self.user_tokens = _load_user_tokens(self.token_file)
                 self._token_signature = signature
             return self.user_tokens
+
+    @property
+    def capabilities(self):
+        return CAPABILITIES + (("daily_points_v1",) if self.points_store else ())
 
     def authenticate(self, supplied: str, client_ip: str) -> str | None:
         if supplied.startswith("Bearer "):
@@ -131,8 +144,17 @@ class GatewayState:
             )
         selected: list[SelectedObject] = []
         for entry in entries:
-            path = (self.root / entry.relative_path).resolve(strict=True)
-            if path == self.root or not path.is_relative_to(self.root):
+            root = (
+                self.points_store.root
+                if entry.dataset == "flow_points" and self.points_store
+                else self.root
+            )
+            path = (
+                self.store_for(entry.dataset).path_for(entry)
+                if entry.dataset == "flow_points"
+                else (root / entry.relative_path).resolve(strict=True)
+            )
+            if path == root or not path.is_relative_to(root):
                 raise RuntimeError(f"catalog 路径越界: {entry.relative_path}")
             size = path.stat().st_size
             if size != entry.bytes:
@@ -157,11 +179,28 @@ class GatewayState:
             selected.append(SelectedObject(entry=entry, path=path, part_header=header))
         return selected
 
+    def store_for(self, dataset):
+        if dataset == "flow_points":
+            if self.points_store is None:
+                raise ValueError("网关尚未配置 --points-root，flow_points 不可用")
+            return self.points_store
+        return self.catalog_store
+
     def select(self, request: DataRequest) -> list[SelectedObject]:
-        return self._materialize(self.catalog_store.selected(request))
+        return self._materialize(self.store_for(request.dataset).selected(request))
 
     def select_refs(self, references: list[dict[str, str]]) -> list[SelectedObject]:
-        return self._materialize(self.catalog_store.selected_refs(references))
+        if not references:
+            return []
+        datasets = {r.get("dataset") for r in references}
+        if "flow_points" in datasets and len(datasets) != 1:
+            raise ValueError("一次传输不能混合基座与逐笔数据")
+        store = (
+            self.store_for("flow_points")
+            if "flow_points" in datasets
+            else self.catalog_store
+        )
+        return self._materialize(store.selected_refs(references))
 
     def select_ranges(self, references):
         selected = self.select_refs(references)
@@ -186,7 +225,7 @@ class GatewayState:
 
 
 class MarketDataGatewayHandler(BaseHTTPRequestHandler):
-    server_version = "MarketDataGateway/0.5"
+    server_version = "MarketDataGateway/0.6"
     protocol_version = "HTTP/1.1"
     wbufsize = 0
 
@@ -242,7 +281,15 @@ class MarketDataGatewayHandler(BaseHTTPRequestHandler):
         self._json(status, {"error": code, "detail": detail})
 
     def _parse_request(self, query: dict[str, list[str]]) -> DataRequest:
-        extra = set(query) - {"dataset", "start", "end", "daily_start", "daily_end"}
+        extra = set(query) - {
+            "dataset",
+            "start",
+            "end",
+            "start_date",
+            "end_date",
+            "daily_start",
+            "daily_end",
+        }
         if extra:
             raise ValueError(
                 f"文件清单接口不支持这些参数: {sorted(extra)}；请通过 SDK 或本机 API 筛选股票/字段"
@@ -254,25 +301,25 @@ class MarketDataGatewayHandler(BaseHTTPRequestHandler):
                 raise ValueError(f"参数 {name} 必须恰好出现一次")
             return values[0]
 
-        return DataRequest.from_values(
-            dataset=one("dataset"),
-            start=one("start"),
-            end=one("end"),
-            daily_start=(one("daily_start") if "daily_start" in query else None),
-            daily_end=one("daily_end") if "daily_end" in query else None,
-        )
+        return DataRequest.from_query({key: one(key) for key in query})
 
     def _manifest(self, request: DataRequest, *, head: bool) -> None:
         # Manifest selection is metadata-only and may cover far more objects
         # than one transfer lease.  The client downloads the exact IDs in
         # small, fair, resumable chunks through /v1/objects.
-        entries = self.state.catalog_store.selected(request)
+        store = self.state.store_for(request.dataset)
+        entries, coverage = (
+            store.selection(request)
+            if request.dataset == "flow_points"
+            else (store.selected(request), None)
+        )
         self._json(
             HTTPStatus.OK,
             {
                 "format": "market-data-selection-v1",
-                "capabilities": CAPABILITIES,
-                "catalog_generated_at": self.state.catalog_store.generated_at,
+                "capabilities": self.state.capabilities,
+                "catalog_generated_at": store.generated_at,
+                "coverage": coverage,
                 "request": {
                     "dataset": request.dataset,
                     "start": request.start.isoformat(),
@@ -418,7 +465,8 @@ class MarketDataGatewayHandler(BaseHTTPRequestHandler):
                 {
                     "status": "ok",
                     "version": __version__,
-                    "capabilities": CAPABILITIES,
+                    "capabilities": self.state.capabilities,
+                    "flow_points_enabled": self.state.points_store is not None,
                     "footer_cache_bytes": self.state.footer_cache.bytes,
                     "metadata_index_enabled": self.state.footer_cache.store is not None,
                     "configured_users": len(self.state.current_user_tokens()),
@@ -615,6 +663,14 @@ def _load_user_tokens(path: Path | None) -> dict[str, str]:
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="87 侧常驻、只读、零拷贝数据网关")
     parser.add_argument("--root", type=Path, required=True)
+    parser.add_argument(
+        "--points-root",
+        type=Path,
+        default=Path(os.environ["MDAPI_POINTS_ROOT"])
+        if os.environ.get("MDAPI_POINTS_ROOT")
+        else None,
+        help="可选：只读每日 points 的实际存储根目录，例如 /data/flow_points",
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=18787)
     parser.add_argument("--token", default=os.environ.get("MDAPI_GATEWAY_TOKEN"))
@@ -663,6 +719,7 @@ def main(argv: list[str] | None = None) -> int:
         max_objects=args.max_objects,
         queue_timeout=args.queue_timeout,
         metadata_index=args.metadata_index,
+        points_root=args.points_root,
     )
     server = MarketDataGatewayServer(
         (args.host, args.port),
@@ -681,7 +738,7 @@ def main(argv: list[str] | None = None) -> int:
                 "status": "ready",
                 "version": __version__,
                 "host": args.host,
-                "port": args.port,
+                "port": server.server_port,
                 "root": str(state.root),
                 "max_streams": args.max_streams,
                 "auth_mode": (
