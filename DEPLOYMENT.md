@@ -1,6 +1,6 @@
-# 0.6.0 部署和运维
+# 部署与运维
 
-0.6 在原网关上增加每日基座读取。升级前备份程序和配置，切换前等待正在传输的请求结束，完成后检查健康接口、原逐笔请求及基座请求。
+网关只读地提供五分钟逐笔数据，并可选用每日主动成交基座。升级前备份程序和配置，切换前等待正在传输的请求结束，完成后检查健康接口、逐笔请求及基座请求。
 
 每日基座通过可选 `--points-root /data/flow_points` 或 `MDAPI_POINTS_ROOT=/data/flow_points` 启用。输入是现有 points，不需要重建 catalog 或改写 Parquet。安装配置会保留该变量，空值默认关闭。`/health` 的 `flow_points_enabled` 与 `daily_points_v1` 能力用于确认是否启用。详见 [FLOW_POINTS.md](FLOW_POINTS.md)。
 
@@ -62,7 +62,7 @@ mdapi-user remove alice
 curl http://10.10.10.87:18787/health
 ```
 
-0.5 返回 version 和 `parquet_footers_v1`、`range_bundles_v1`、`http_range_v1` 能力标志。`metadata_index_enabled` 表示持久元数据缓存启用。
+健康接口返回 version 和 `parquet_footers_v1`、`range_bundles_v1`、`http_range_v1` 能力标志；启用基座后还会返回 `flow_points_enabled` 与 `daily_points_v1`。`metadata_index_enabled` 表示持久元数据缓存启用。
 
 ## 元数据缓存
 

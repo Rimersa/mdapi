@@ -1,6 +1,6 @@
-# 0.6.0：按日期区间流式读取主动成交基座
+# 主动成交基座（flow_points）
 
-新增接口读取已落盘的每日 `points.parquet`，返回订单级主动成交事件，不重新识别、清洗、分档或计算因子。正式网关地址沿用 `10.10.10.87:18787`，用户令牌保持不变；客户端需升级至 0.6。
+本接口按日期区间读取已落盘的每日 `points.parquet`，返回订单级主动成交事件，不重新识别、清洗、分档或计算因子。网关地址和用户令牌与逐笔接口一致。
 
 ## 默认行为与选择方式
 
@@ -42,7 +42,7 @@ with MarketDataClient.connect(cores=2) as api:
     print(api.last_read_stats)
 ```
 
-`connect()` 读取现有 `~/.config/market-data-api/client.json`。第一次使用的机器可运行发行包内的 `./install-client.sh --native 10.10.10.87`，按提示填写个人令牌。
+`connect()` 读取现有 `~/.config/market-data-api/client.json`。新机器可运行发行包内的 `./install-client.sh --native 10.10.10.87`，按提示填写个人令牌。
 
 ## HTTP 请求与返回
 
@@ -87,7 +87,7 @@ order 与 price 两种口径包含同一笔成交，**不能把全表 amount/vol
 
 ## 配置与复现测试
 
-新增网关参数 `--points-root`，或环境变量 `MDAPI_POINTS_ROOT`。不设置即不启用基座数据集。87 使用真实根目录 `/data/flow_points`，自动发现 `machine=*/trade_date=*`，不依赖手动制作的静态 `flow_points_all` 链接集合；也支持根目录直接放 `trade_date=*`。同一天出现两份目录会报错。
+网关参数 `--points-root` 或环境变量 `MDAPI_POINTS_ROOT` 用于启用基座数据集。不设置即不启用基座数据集。87 使用真实根目录 `/data/flow_points`，自动发现 `machine=*/trade_date=*`，不依赖手动制作的静态 `flow_points_all` 链接集合；也支持根目录直接放 `trade_date=*`。同一天出现两份目录会报错。
 
 日期目录可通过软链接指向根目录内的不可变版本；链接不能逃到配置根目录以外。因此不要把 `/data/flow_points_all` 这个外部链接视图作为 points-root。元数据缓存必须同时位于逐笔和基座数据根目录之外。网关仍只使用 Python 标准库，CPU 解码和最终过滤在客户端完成。
 

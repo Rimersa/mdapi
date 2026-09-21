@@ -1,97 +1,108 @@
-# 0.6.0 安装与升级
+# 安装与快速开始
 
-0.6 新增每日主动成交基座接口。读取端升级客户端即可使用已启用基座的网关；原有地址、令牌及逐笔查询方式保留。基座接口见 [FLOW_POINTS.md](FLOW_POINTS.md)。
+完整说明见 [README.md](README.md)。本文给出从零部署和使用的短路径。
 
-现有行情 Parquet 和 catalog v2 无需修改。要获得按股票、字段减少传输量的能力，网关和客户端都应升级。
+## 服务端
 
-## 87 服务器
+1. 准备数据根目录，例如 `/data/market_data_5m`，其中必须包含 `catalog.json` 和五分钟 Parquet。主动成交基座目录例如 `/data/flow_points`。
 
-管理员升级服务器：解压 `market-data-api-0.6.0-easy-install.tar.gz`，进入目录。先在现有 `gateway.env` 中设置 `MDAPI_POINTS_ROOT=/data/flow_points`，然后执行：
+2. 下载 0.6.0 发布包：
+
+```bash
+VERSION=0.6.0
+curl -LO "https://github.com/Rimersa/mdapi/releases/download/v${VERSION}/market-data-api-${VERSION}-easy-install.tar.gz"
+curl -LO "https://github.com/Rimersa/mdapi/releases/download/v${VERSION}/market-data-api-${VERSION}-easy-install.tar.gz.sha256"
+sha256sum -c "market-data-api-${VERSION}-easy-install.tar.gz.sha256"
+tar -xzf "market-data-api-${VERSION}-easy-install.tar.gz"
+cd "market-data-api-${VERSION}"
+```
+
+3. 安装网关。无 sudo 安装为当前账号的用户服务；有 sudo 安装为系统服务：
 
 ```bash
 ./install-server.sh /data/market_data_5m
+# 或
+sudo ./install-server.sh /data/market_data_5m
 ```
 
-87 当前采用 quant 的用户服务，延续该模式不加 sudo。系统服务部署才使用 sudo。安装器保留已有用户令牌和地址、端口、并发设置，更新程序并重启服务；不修改行情文件和 catalog。
+安装器会启动服务并执行健康检查。系统服务模板使用 `quant` 账号，若服务器没有该账号需先创建；用户服务需要 `loginctl enable-linger` 才能无人登录时保持运行。
 
-新增的压缩元数据缓存位于：
+4. 启用主动成交基座：
 
-- 用户服务：`~/.cache/market-data-api-server/footers.sqlite3`
-- 系统服务：`/var/cache/market-data-api/footers.sqlite3`
+```bash
+# 用户服务
+sed -i 's|^MDAPI_POINTS_ROOT=.*|MDAPI_POINTS_ROOT=/data/flow_points|' \
+  ~/.config/market-data-api-server/gateway.env
+systemctl --user restart market-data-gateway
 
-用户服务需要管理员开启 `loginctl enable-linger quant` 才能保证无人登录时继续运行。
+# 系统服务
+sudo sed -i 's|^MDAPI_POINTS_ROOT=.*|MDAPI_POINTS_ROOT=/data/flow_points|' \
+  /etc/market-data-api/gateway.env
+sudo systemctl restart market-data-gateway
+```
 
-## Python / Notebook 用户
+5. 创建用户并保存输出的令牌：
 
-先激活自己使用的 Python / Conda 环境，在发行包目录执行：
+```bash
+# 用户服务
+~/.local/bin/mdapi-user add alice
+
+# 系统服务
+sudo /usr/local/sbin/mdapi-user add alice
+```
+
+6. 检查健康接口：
+
+```bash
+curl http://10.10.10.87:18787/health
+```
+
+确认 `"version":"0.6.0"`、`"flow_points_enabled":true`，能力列表包含 `"daily_points_v1"`。
+
+## 客户端
+
+在目标 Python / Conda 环境中：
 
 ```bash
 ./install-client.sh --native 10.10.10.87
 ```
 
-按提示输入管理员分配的个人令牌。已有配置的升级，也可以只安装新版 wheel：
+按提示输入自己的令牌。脚本会安装客户端 wheel 并写入 `~/.config/market-data-api/client.json`。如果目标解释器不是默认的 `python3`，使用：
 
 ```bash
-python -m pip install --upgrade 'wheels/market_data_api-0.6.0-py3-none-any.whl[client]'
+MDAPI_PYTHON=/path/to/conda/env/bin/python ./install-client.sh --native 10.10.10.87
 ```
 
-开始读取：
-
-```python
-from market_data_api import MarketDataClient
-
-with MarketDataClient.connect(cores=2) as api:
-    for batch in api.iter_points("2026-09-01", "2026-09-04", symbols=["000001.SZ"]):
-        print(batch.num_rows)
-```
-
-也可以继续读取原始逐笔：
-
-```python
-from market_data_api import MarketDataClient
-
-client = MarketDataClient.connect()
-query = {
-    "dataset": "orders",
-    "start_date": "2026-09-01",
-    "end_date": "2026-09-04",
-    "daily_start": "09:15",
-    "daily_end": "09:25",
-    "symbols": ["000001.SZ", "600000.SH"],
-    "columns": ["symbol", "event_time", "price_i32", "qty_i32"],
-}
-for batch in client.iter_batches(query):
-    print(batch.num_rows)
-print(client.last_read_stats)
-client.close()
-```
-
-不需要启动额外服务，默认不保存行情对象。结果较小时可用 `client.read_table(query)` 得到完整 Arrow 表。
-
-## 继续使用本机 HTTP API
+也可以继续使用本机 HTTP 代理模式：
 
 ```bash
 ./install-client.sh 10.10.10.87
 ~/.local/bin/mdapi-local
 ```
 
-Notebook 环境也需安装上述客户端 wheel，然后保持原用法：
+## 第一个请求
 
 ```python
 from market_data_api import MarketDataClient
-client = MarketDataClient("http://127.0.0.1:18788")
+
+with MarketDataClient.connect(cores=2) as client:
+    for batch in client.iter_points("2026-09-01", "2026-09-04", symbols=["000001.SZ"]):
+        print(batch.num_rows)
+    print(client.last_read_stats["coverage"])
+```
+
+逐笔数据示例：
+
+```python
+query = {
+    "dataset": "snapshots",
+    "start": "2026-09-04T09:30:00+08:00",
+    "end": "2026-09-04T09:35:00+08:00",
+    "symbols": ["000001.SZ"],
+    "columns": ["symbol", "event_time", "last_px_i32", "volume_i64"],
+}
 for batch in client.iter_batches(query):
     print(batch.num_rows)
 ```
 
-使用基座功能时，本机代理也需升级到 0.6 并重新启动；这不会改变原有逐笔请求的参数规则。SDK 会检查股票过滤确认信息，避免新参数被旧服务静默忽略。
-
-## 可选的元数据预热
-
-在已安装客户端的机器上运行，填充的是服务器辅助索引缓存，不是下载行情：
-
-```bash
-python tools/warm_metadata.py \
-  --config ~/.config/market-data-api/client.json \
-  --start-date 2026-09-01 --end-date 2026-09-04
-```
+大范围查询请使用 `iter_batches()` 逐批消费，不要用 `read_table()` 一次性把全部结果放进内存。基座口径、字段和 coverage 说明见 [FLOW_POINTS.md](FLOW_POINTS.md) 与 [README.md](README.md)。
