@@ -44,12 +44,13 @@ CLIENT_INSTALL_ROOT="${CLIENT_DATA_PARENT}/market-data-api"
 CLIENT_CONFIG_ROOT="${CLIENT_CONFIG_PARENT}/market-data-api"
 CLIENT_VENV="${CLIENT_INSTALL_ROOT}/venv"
 CLIENT_CONFIG="${CLIENT_CONFIG_ROOT}/client.json"
-CLIENT_WHEEL="${CLIENT_PACKAGE_ROOT}/wheels/market_data_api-0.5.0-py3-none-any.whl"
-
-if [[ ! -f "${CLIENT_WHEEL}" ]]; then
-  echo "发布包不完整：找不到 ${CLIENT_WHEEL}" >&2
+CLIENT_WHEEL_DIR="${CLIENT_PACKAGE_ROOT}/wheels"
+CLIENT_WHEELS=("${CLIENT_WHEEL_DIR}"/market_data_api-*.whl)
+if [[ ${#CLIENT_WHEELS[@]} -ne 1 || ! -f "${CLIENT_WHEELS[0]}" ]]; then
+  echo "发布包不完整：${CLIENT_WHEEL_DIR} 下应恰好有一个 market_data_api-*.whl" >&2
   exit 2
 fi
+CLIENT_WHEEL="${CLIENT_WHEELS[0]}"
 mkdir -p "${CLIENT_INSTALL_ROOT}" "${CLIENT_CONFIG_ROOT}" "${CLIENT_BIN_PARENT}"
 if [[ ${CLIENT_NATIVE} -eq 1 ]]; then
   "${CLIENT_PYTHON}" -m pip install --upgrade "${CLIENT_WHEEL}[client]"
