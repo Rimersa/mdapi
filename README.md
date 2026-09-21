@@ -120,7 +120,7 @@ sudo ./install-server.sh /data/market_data_5m alice bob
 
 安装器会输出新用户的令牌。没有用户时健康接口可用，但所有数据接口保持锁定。
 
-### 5. 修改监听地址（服务器不是 10.10.10.87 时）
+### 5. 修改监听地址
 
 安装器默认写入 `MDAPI_GATEWAY_HOST=10.10.10.87`、`MDAPI_GATEWAY_PORT=18787`。如果目标服务器 IP 不同，修改配置后重启：
 
