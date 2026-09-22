@@ -68,3 +68,86 @@ python tools/publish_daily_quality.py \
 ```
 
 发布器复制到不可变版本目录，校验行数、日期、基础字段和兼容类型后，最后原子替换`table.json`。已有读取继续使用固定旧版本；下一次查询看到新版本。读服务不会读取目录中未登记的文件，不会绕过根目录边界。
+
+## 实际接入：准备、发布、读取
+
+计算程序负责计算因子；发布器负责登记已经计算好的Parquet。GitHub存放程序与文档，因子数据放在数据服务器上，不提交到Git。
+
+### 1. 准备按日期存放的结果
+
+例如新增日表`daily_order_flow`，在服务器准备：
+
+```text
+/home/quant/prepared/daily_order_flow/
+  trade_date=2026-09-21/part-000.parquet
+  trade_date=2026-09-22/part-000.parquet
+```
+
+每个Parquet至少包含两列：`symbol`为字符串（例如`000001.SZ`），`time`为带`Asia/Shanghai`时区的时间戳。日表可用所属日期零点；窗口表使用约定的窗口起点或终点。其他列就是已算好的结果，例如`buy_amount_3`、`sell_amount_3`。不要把无时区字符串当作时间戳发布。
+
+日期目录必须与`time`所在的上海日期一致。日表每个股票日一行；窗口表按股票和窗口时间组织。需要拆成多个文件时，同一日期的所有分片都放进该日期目录，避免漏片或重复行。
+
+### 2. 在服务器发布
+
+在解压后的0.7.0安装包目录中运行，`python`须是已安装`market-data-api[client]`、可使用PyArrow的环境；读取服务自身仍只需要系统Python标准库。
+
+```bash
+python tools/publish_derived_table.py \
+  --root /data/flow_points/.derived_tables \
+  --name daily_order_flow \
+  --input /home/quant/prepared/daily_order_flow \
+  --granularity daily \
+  --description '每日每股三档订单口径主买卖金额'
+```
+
+当前87主机已经启用上述发布根目录，可用其现有管理解释器：
+
+```bash
+PUBLISH_PYTHON=/home/quant/sz_blank_repair_20260922/api-admin-0.7/bin/python
+PUBLISH_PACKAGE=/home/quant/sz_blank_repair_20260922/market-data-api-0.7.0
+"$PUBLISH_PYTHON" "$PUBLISH_PACKAGE/tools/publish_derived_table.py" \
+  --root /data/flow_points/.derived_tables \
+  --name daily_order_flow \
+  --input /home/quant/prepared/daily_order_flow \
+  --granularity daily
+```
+
+首次使用某个表名就是新增表。发布成功后，下一次查询自动可见，无须改网关配置或重启。`--field-info fields.json`可附加字段单位和说明，例如：
+
+```json
+{
+  "buy_amount_3": {"unit": "CNY", "description": "三档订单口径主买金额"},
+  "sell_amount_3": {"unit": "CNY", "description": "三档订单口径主卖金额"}
+}
+```
+
+### 3. 客户端读取
+
+```python
+from market_data_api import MarketDataClient
+
+with MarketDataClient.connect() as client:
+    print(client.tables())                    # 发现新表
+    print(client.tables("daily_order_flow"))  # 查看实际字段和说明
+    table = client.read_derived(
+        "daily_order_flow", "2026-09-21", "2026-09-22",
+        symbols=["000001.SZ"],
+        columns=["time", "symbol", "buy_amount_3", "sell_amount_3"],
+    )
+    frame = table.to_pandas()
+```
+
+读取当前已有的质量表，把表名换成`daily_quality`，字段换成`base_volume`、`reference_volume`、`volume_error_pct`即可。可运行随包的`examples/read_derived.py`。
+
+### 四种更新的区别
+
+| 需求 | 操作 | 已有数据的处理 |
+| --- | --- | --- |
+| 新增交易日 | 相同表名，只提供新日期目录 | 其他日期保留 |
+| 修正已有日期 | 相同表名，提供该日期完整结果 | 该日期全部分片被替换 |
+| 增加因子列 | 先把原列与新列按股票、时间合并，再发布完整日期 | 未更新的历史日期，新列返回null |
+| 新增窗口表 | 用新表名，如`orders_5m`，设置`--granularity 5m` | 原日表保留，客户端通过新表名读取 |
+
+**发布工具不是逐行追加或逐列合并。** 如果同一日期原来有多个文件，重新发布时要提供该日期的全部文件；若向`daily_quality`加列，也必须保留原有质量列。只传新因子列会让替换日期中缺少的旧列返回null。`--granularity`只说明数据粒度，不会替你把逐笔或日数据重新聚合成5分钟。
+
+同表已有字段的数据类型保持不变，改变含义或类型使用新字段名或新表。按这个约定新增数据，只调整计算结果和发布参数，后续无需升级客户端或服务端。
