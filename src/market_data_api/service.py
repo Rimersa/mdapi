@@ -17,7 +17,13 @@ from .client import (
     iter_cached_batches,
     iter_remote_batches,
 )
-from .model import DataRequest, FetchMode, LocalResources, detect_local_resources
+from .model import (
+    DataRequest,
+    FetchMode,
+    LocalResources,
+    detect_local_resources,
+    is_derived,
+)
 from .selective import MetadataCache, ReadOptions, ReadStats, iter_selective_batches
 
 ARROW_MEMORY_FACTOR = {
@@ -119,21 +125,25 @@ class Preflight:
             "read_path": "adaptive_ranges" if self.selective else "whole_objects",
             "symbols_supported": True,
             "coverage": self.selection.coverage,
-            "working_memory_estimate_kind": "per_bundle_runtime_checked"
-            if self.selective
-            else "largest_bucket",
-            "estimated_transfer_bytes": None
-            if self.selective
-            else self.missing_cache_bytes
-            if self.cache_plan is not None
-            else self.selection.source_bytes,
+            "working_memory_estimate_kind": (
+                "per_bundle_runtime_checked" if self.selective else "largest_bucket"
+            ),
+            "estimated_transfer_bytes": (
+                None
+                if self.selective
+                else (
+                    self.missing_cache_bytes
+                    if self.cache_plan is not None
+                    else self.selection.source_bytes
+                )
+            ),
         }
 
 
 def _estimated_arrow_memory(selection: Selection, dataset: str) -> int:
     return max(
         selection.uncompressed_bytes,
-        selection.source_bytes * ARROW_MEMORY_FACTOR[dataset],
+        selection.source_bytes * ARROW_MEMORY_FACTOR.get(dataset, 10),
     )
 
 
@@ -141,7 +151,7 @@ def _bucket_working_bytes(entries: list[ObjectEntry], dataset: str) -> int:
     grouped: dict[str, int] = {}
     for entry in entries:
         grouped[entry.bucket_start] = grouped.get(entry.bucket_start, 0) + entry.bytes
-    largest = max(grouped.values(), default=0) * ARROW_MEMORY_FACTOR[dataset]
+    largest = max(grouped.values(), default=0) * ARROW_MEMORY_FACTOR.get(dataset, 10)
     return largest * 2 + 128 * 1024**2
 
 
@@ -301,6 +311,12 @@ class DataService:
     def preflight(self, request: DataRequest) -> Preflight:
         resources = detect_local_resources(str(self.cache.root))
         selection = self._selection(request)
+        if is_derived(request.dataset):
+            from .derived import declared_schema
+
+            if "derived_tables_v1" not in selection.capabilities:
+                raise ValueError("派生表需要支持derived_tables_v1的网关")
+            declared_schema(selection.coverage, request.columns)
         if not selection.entries:
             raise NoData(
                 f"{request.dataset} 在 [{request.start.isoformat()}, "
@@ -315,22 +331,17 @@ class DataService:
             "range_bundles_v1" in selection.capabilities
             and "parquet_footers_v1" in selection.capabilities
         )
-        if (
-            request.read_strategy == "ranges" or request.dataset == "flow_points"
-        ) and not capable:
+        if (request.read_strategy == "ranges" or request.is_daily_file) and not capable:
             raise ValueError("ranges 读取需要 0.5 或更新的服务器网关")
         selective = (
             request.mode == FetchMode.DIRECT
             and capable
-            and (
-                request.read_strategy != "sequential"
-                or request.dataset == "flow_points"
-            )
+            and (request.read_strategy != "sequential" or request.is_daily_file)
             and (
                 request.symbols is not None
                 or request.columns is not None
                 or request.read_strategy == "ranges"
-                or request.dataset == "flow_points"
+                or request.is_daily_file
             )
         )
         if selective:
@@ -447,6 +458,8 @@ class DataService:
         plan = preflight or self.preflight(request)
         monitor = self._memory_monitor(plan.memory_reserve)
         if plan.selective:
+            from .derived import declared_schema
+
             batches = iter_selective_batches(
                 self.pool,
                 request,
@@ -460,6 +473,11 @@ class DataService:
                 network_retries=self.limits.network_retries,
                 network_retry_backoff=self.limits.network_retry_backoff,
                 object_request_size=self.limits.object_request_size,
+                output_schema=(
+                    declared_schema(plan.selection.coverage, request.columns)
+                    if is_derived(request.dataset)
+                    else None
+                ),
             )
             return plan, self._count_batches(batches, plan.stats)
         if request.mode == FetchMode.DIRECT:

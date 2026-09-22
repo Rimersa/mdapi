@@ -593,7 +593,7 @@ def _iter_filtered_batches_from_parquet(
                         + value.microsecond // 1_000
                     )
 
-                if request.dataset == "flow_points":
+                if request.is_daily_file:
                     local_time = (
                         pc.local_timestamp(time_int) if time_type.tz else time_int
                     )

@@ -229,6 +229,28 @@ def create_app(service: DataService):
             "object_request_size": service.limits.object_request_size,
         }
 
+    def table_description(name=None):
+        from .model import is_derived
+
+        if name is not None and not is_derived("derived." + name):
+            raise HTTPException(status_code=422, detail="非法派生表名称")
+        try:
+            with service.pool.connection() as connection:
+                response = connection._response(
+                    "GET", "/v1/tables" + ("/" + name if name is not None else "")
+                )
+                return json.loads(response.read())
+        except GatewayError as exc:
+            raise HTTPException(status_code=502, detail=exc.detail) from exc
+
+    @app.get("/v1/tables")
+    def tables():
+        return table_description()
+
+    @app.get("/v1/tables/{name}")
+    def table_info(name: str):
+        return table_description(name)
+
     @app.post("/v1/estimate")
     def estimate(query: DataQuery):
         try:
@@ -298,12 +320,12 @@ def create_app(service: DataService):
                 "X-MDAPI-Working-Memory-Limit": str(plan.working_memory_limit),
                 "X-MDAPI-Rows": str(plan.selection.rows),
                 "X-MDAPI-Mode": request.mode.value,
-                "X-MDAPI-Symbols-Applied": "true"
-                if request.symbols is not None
-                else "false",
-                "X-MDAPI-Read-Path": "adaptive_ranges"
-                if plan.selective
-                else "whole_objects",
+                "X-MDAPI-Symbols-Applied": (
+                    "true" if request.symbols is not None else "false"
+                ),
+                "X-MDAPI-Read-Path": (
+                    "adaptive_ranges" if plan.selective else "whole_objects"
+                ),
                 "X-MDAPI-Missing-Cache-Bytes": str(plan.missing_cache_bytes),
             }
             return StreamingResponse(

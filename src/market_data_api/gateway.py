@@ -17,7 +17,8 @@ from pathlib import Path
 
 from . import __version__
 from .catalog import CatalogStore, ObjectEntry, manifest_summary
-from .model import DataRequest
+from .model import DataRequest, is_derived
+from .derived import DerivedStore
 from .protocol import BUNDLE_MAGIC, encode_bundle_end, encode_part_header
 from .scheduler import FairStreamScheduler, StreamQueueTimeout
 from .points import PointsStore
@@ -58,11 +59,17 @@ class GatewayState:
         queue_timeout: float,
         metadata_index: Path | None = None,
         points_root: Path | None = None,
+        derived_root: Path | None = None,
     ) -> None:
         self.root = root.resolve(strict=True)
         self.catalog_store = CatalogStore(self.root)
         self.points_store = (
             PointsStore(points_root) if points_root is not None else None
+        )
+        self.derived_store = (
+            DerivedStore(derived_root, capacity=8192)
+            if derived_root is not None
+            else None
         )
         self.token = token
         self.user_tokens = dict(user_tokens or {})
@@ -84,6 +91,10 @@ class GatewayState:
                 self.points_store.root
             ):
                 raise ValueError("元数据缓存必须位于基座数据根目录之外")
+            if self.derived_store and metadata_index.is_relative_to(
+                self.derived_store.root
+            ):
+                raise ValueError("元数据缓存必须位于派生表根目录之外")
         self.footer_cache = FooterCache(
             store=FooterStore(metadata_index) if metadata_index is not None else None
         )
@@ -111,7 +122,11 @@ class GatewayState:
 
     @property
     def capabilities(self):
-        return CAPABILITIES + (("daily_points_v1",) if self.points_store else ())
+        return (
+            CAPABILITIES
+            + (("daily_points_v1",) if self.points_store else ())
+            + (("derived_tables_v1",) if self.derived_store else ())
+        )
 
     def authenticate(self, supplied: str, client_ip: str) -> str | None:
         if supplied.startswith("Bearer "):
@@ -144,14 +159,12 @@ class GatewayState:
             )
         selected: list[SelectedObject] = []
         for entry in entries:
-            root = (
-                self.points_store.root
-                if entry.dataset == "flow_points" and self.points_store
-                else self.root
-            )
+            store = self.store_for(entry.dataset)
+            daily_file = entry.dataset == "flow_points" or is_derived(entry.dataset)
+            root = store.root if daily_file else self.root
             path = (
                 self.store_for(entry.dataset).path_for(entry)
-                if entry.dataset == "flow_points"
+                if daily_file
                 else (root / entry.relative_path).resolve(strict=True)
             )
             if path == root or not path.is_relative_to(root):
@@ -180,6 +193,10 @@ class GatewayState:
         return selected
 
     def store_for(self, dataset):
+        if is_derived(dataset):
+            if self.derived_store is None:
+                raise ValueError("网关尚未配置 --derived-root，派生表不可用")
+            return self.derived_store
         if dataset == "flow_points":
             if self.points_store is None:
                 raise ValueError("网关尚未配置 --points-root，flow_points 不可用")
@@ -193,13 +210,10 @@ class GatewayState:
         if not references:
             return []
         datasets = {r.get("dataset") for r in references}
-        if "flow_points" in datasets and len(datasets) != 1:
-            raise ValueError("一次传输不能混合基座与逐笔数据")
-        store = (
-            self.store_for("flow_points")
-            if "flow_points" in datasets
-            else self.catalog_store
-        )
+        special = any(d == "flow_points" or is_derived(d) for d in datasets)
+        if special and len(datasets) != 1:
+            raise ValueError("一次传输不能混合基座、派生表与逐笔数据")
+        store = self.store_for(next(iter(datasets))) if special else self.catalog_store
         return self._materialize(store.selected_refs(references))
 
     def select_ranges(self, references):
@@ -310,7 +324,7 @@ class MarketDataGatewayHandler(BaseHTTPRequestHandler):
         store = self.state.store_for(request.dataset)
         entries, coverage = (
             store.selection(request)
-            if request.dataset == "flow_points"
+            if request.is_daily_file
             else (store.selected(request), None)
         )
         self._json(
@@ -467,6 +481,7 @@ class MarketDataGatewayHandler(BaseHTTPRequestHandler):
                     "version": __version__,
                     "capabilities": self.state.capabilities,
                     "flow_points_enabled": self.state.points_store is not None,
+                    "derived_tables_enabled": self.state.derived_store is not None,
                     "footer_cache_bytes": self.state.footer_cache.bytes,
                     "metadata_index_enabled": self.state.footer_cache.store is not None,
                     "configured_users": len(self.state.current_user_tokens()),
@@ -490,6 +505,19 @@ class MarketDataGatewayHandler(BaseHTTPRequestHandler):
             query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
             if parsed.path == "/v1/object":
                 self._http_object(query, head=head, principal=principal)
+                return
+            if parsed.path == "/v1/tables" or parsed.path.startswith("/v1/tables/"):
+                store = self.state.derived_store
+                if store is None:
+                    raise ValueError("网关尚未配置派生表")
+                if query:
+                    raise ValueError("表结构接口不接受查询参数")
+                value = (
+                    {"tables": store.tables()}
+                    if parsed.path == "/v1/tables"
+                    else store.describe(parsed.path[len("/v1/tables/") :])
+                )
+                self._json(HTTPStatus.OK, value, head=head)
                 return
             request = self._parse_request(query)
             if parsed.path == "/v1/manifest":
@@ -666,12 +694,24 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--points-root",
         type=Path,
-        default=Path(os.environ["MDAPI_POINTS_ROOT"])
-        if os.environ.get("MDAPI_POINTS_ROOT")
-        else None,
+        default=(
+            Path(os.environ["MDAPI_POINTS_ROOT"])
+            if os.environ.get("MDAPI_POINTS_ROOT")
+            else None
+        ),
         help="可选：只读每日 points 的实际存储根目录，例如 /data/flow_points",
     )
     parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument(
+        "--derived-root",
+        type=Path,
+        default=(
+            Path(os.environ["MDAPI_DERIVED_ROOT"])
+            if os.environ.get("MDAPI_DERIVED_ROOT")
+            else None
+        ),
+        help="派生表发布根目录；新增表/字段自动发现，无需重启",
+    )
     parser.add_argument("--port", type=int, default=18787)
     parser.add_argument("--token", default=os.environ.get("MDAPI_GATEWAY_TOKEN"))
     parser.add_argument(
@@ -720,6 +760,7 @@ def main(argv: list[str] | None = None) -> int:
         queue_timeout=args.queue_timeout,
         metadata_index=args.metadata_index,
         points_root=args.points_root,
+        derived_root=args.derived_root,
     )
     server = MarketDataGatewayServer(
         (args.host, args.port),
@@ -744,11 +785,11 @@ def main(argv: list[str] | None = None) -> int:
                 "auth_mode": (
                     "per_user_tokens"
                     if user_tokens
-                    else "locked"
-                    if args.token_file
-                    else "shared_token"
-                    if args.token
-                    else "client_ip"
+                    else (
+                        "locked"
+                        if args.token_file
+                        else "shared_token" if args.token else "client_ip"
+                    )
                 ),
             },
             ensure_ascii=False,

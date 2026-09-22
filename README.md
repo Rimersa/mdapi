@@ -1,8 +1,8 @@
 # Market Data API
 
-Market Data API 是一个只读的 A 股五分钟行情访问服务。服务端运行在数据服务器上，客户端按 HTTP 请求读取逐笔委托、逐笔成交、快照，以及每日主动成交基座数据，结果以 Arrow `RecordBatch` 或 `Table` 返回。
+Market Data API 是一个只读的 A 股五分钟行情访问服务。服务端运行在数据服务器上，客户端按 HTTP 请求读取逐笔委托、逐笔成交、快照，每日主动成交基座，以及日级质量和窗口因子派生表，结果以 Arrow `RecordBatch` 或 `Table` 返回。
 
-当前版本：**0.6.0**  
+当前版本：**0.7.0**
 项目地址：<https://github.com/Rimersa/mdapi>
 
 ## 数据接口
@@ -13,8 +13,11 @@ Market Data API 是一个只读的 A 股五分钟行情访问服务。服务端�
 | `trades` | 逐笔成交 | 同上 | `direct` / `cache` |
 | `snapshots` | 快照 | 同上 | `direct` / `cache` |
 | `flow_points` | 每日主动成交基座（已识别、分档的事件原表） | `start_date/end_date` 包含首尾日期，默认全天 | `direct` |
+| `derived.<表名>` | 日级质量和任意窗口因子；首表 `daily_quality` | 日期首尾包含，支持股票/字段/窗口筛选 | `direct` |
 
 服务端只读使用现有五分钟 Parquet、catalog v2 和每日基座文件，不会重切、清洗或改写数据。
+
+新增字段和新表通过发布数据自动发现，不需要再次升级或重启客户端和网关。质量偏差带正负号，参考量大于0而基座量为0时返回-100%；API不按1%等阈值删行。使用与发布说明见 [DERIVED_TABLES.md](DERIVED_TABLES.md)。
 
 ## 系统组成
 
@@ -67,7 +70,7 @@ flow-base 生成每日基座   ──►   /data/flow_points          ──► 
 ### 2. 下载并校验发布包
 
 ```bash
-VERSION=0.6.0
+VERSION=0.7.0
 curl -LO "https://github.com/Rimersa/mdapi/releases/download/v${VERSION}/market-data-api-${VERSION}-easy-install.tar.gz"
 curl -LO "https://github.com/Rimersa/mdapi/releases/download/v${VERSION}/market-data-api-${VERSION}-easy-install.tar.gz.sha256"
 sha256sum -c "market-data-api-${VERSION}-easy-install.tar.gz.sha256"
@@ -185,7 +188,7 @@ curl http://10.10.10.87:18787/health
 ```json
 {
   "status": "ok",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "configured_users": 1,
   "flow_points_enabled": true,
   "max_streams": 2,
@@ -204,7 +207,7 @@ curl http://10.10.10.87:18787/health
 在目标 Python / Conda 环境中执行：
 
 ```bash
-cd market-data-api-0.6.0
+cd market-data-api-0.7.0
 ./install-client.sh --native 10.10.10.87
 ```
 
@@ -223,7 +226,7 @@ MDAPI_PYTHON=/path/to/conda/env/bin/python ./install-client.sh --native 10.10.10
 也可以手工只装 wheel：
 
 ```bash
-python -m pip install --upgrade 'wheels/market_data_api-0.6.0-py3-none-any.whl[client]'
+python -m pip install --upgrade 'wheels/market_data_api-0.7.0-py3-none-any.whl[client]'
 ```
 
 然后使用 `scripts/write_client_config.py` 生成配置文件，或直接使用安装脚本。
@@ -242,7 +245,7 @@ from market_data_api import MarketDataClient
 client = MarketDataClient("http://127.0.0.1:18788")
 ```
 
-读取基座时，本机代理也必须升级到 0.6.0。
+读取基座时，本机代理也必须升级到 0.7.0。
 
 ### 验证连接
 
@@ -446,7 +449,7 @@ sudo journalctl -u market-data-gateway -n 100
 - **返回 401 / unauthorized**：检查客户端配置中的令牌，或让管理员重新执行 `mdapi-user rotate`。
 - **基座接口不存在**：确认 `MDAPI_POINTS_ROOT` 已在配置中，指向真实基座根目录，并重启网关；检查 `/health` 的 `flow_points_enabled`。
 - **`ModuleNotFoundError: market_data_api`**：客户端安装到了别的 Python 环境，请在目标 Notebook/Conda 环境重新安装 wheel，或用 `MDAPI_PYTHON` 指定解释器。
-- **本机代理读不到基座**：`mdapi-local` 及其安装包必须升级到 0.6.0 并重新启动。
+- **本机代理读不到基座**：`mdapi-local` 及其安装包必须升级到 0.7.0 并重新启动。
 - **内存占用高**：改用 `iter_batches`，加 `symbols`/`columns`/时间窗口限制；不要对大区间使用 `read_table`。
 
 ## 文档索引

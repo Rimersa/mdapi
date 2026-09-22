@@ -65,9 +65,7 @@ class RemoteMarketDataClient:
         token = (
             gateway_token
             if gateway_token is not None
-            else raw.get("gateway_token")
-            if same_origin
-            else None
+            else raw.get("gateway_token") if same_origin else None
         )
         cache = Path(
             cache_root or raw.get("cache_root", Path.home() / ".cache/market-data-api")
@@ -168,6 +166,48 @@ class RemoteMarketDataClient:
         self._check_open()
         with self._errors():
             return self.service.preflight(DataRequest.from_query(query)).as_dict()
+
+    def tables(self, name=None):
+        """Discover tables and their current fields without a client release."""
+        from .model import is_derived
+
+        if name is not None and not is_derived("derived." + name):
+            raise ValueError("非法派生表名称")
+        self._check_open()
+        with self._errors(), self.service.pool.connection() as connection:
+            response = connection._response(
+                "GET", "/v1/tables" + ("/" + name if name is not None else "")
+            )
+            return json.loads(response.read())
+
+    def iter_derived(
+        self, table, start_date, end_date, *, symbols=None, columns=None, **kwargs
+    ):
+        """Read daily or window-derived tables; both dates are inclusive."""
+        yield from self.iter_batches(
+            dict(
+                dataset="derived." + table,
+                start_date=start_date,
+                end_date=end_date,
+                symbols=symbols,
+                columns=columns,
+                **kwargs,
+            )
+        )
+
+    def read_derived(
+        self, table, start_date, end_date, *, symbols=None, columns=None, **kwargs
+    ):
+        return self.read_table(
+            dict(
+                dataset="derived." + table,
+                start_date=start_date,
+                end_date=end_date,
+                symbols=symbols,
+                columns=columns,
+                **kwargs,
+            )
+        )
 
     def iter_batches(self, query):
         self._check_open()

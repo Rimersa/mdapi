@@ -70,6 +70,7 @@ def test_gateway_upgrade_preserves_operator_settings(tmp_path):
     previous = tmp_path / "gateway.env"
     previous.write_text(
         "MDAPI_GATEWAY_HOST=127.0.0.1\nMDAPI_GATEWAY_PORT=19000\nMDAPI_MAX_STREAMS=3\n"
+        f"MDAPI_DERIVED_ROOT={tmp_path}/derived\n"
     )
     output = tmp_path / "new.env"
     tool = PROJECT_ROOT / "scripts" / "write_gateway_config.py"
@@ -89,6 +90,7 @@ def test_gateway_upgrade_preserves_operator_settings(tmp_path):
     assert result["MDAPI_GATEWAY_PORT"] == "19000"
     assert result["MDAPI_MAX_STREAMS"] == "3"
     assert result["MDAPI_DATA_ROOT"] == str(tmp_path / "data")
+    assert result['MDAPI_DERIVED_ROOT']==str(tmp_path/'derived')
 
 
 def test_manage_users_add_rotate_and_remove_preserves_mode(tmp_path: Path) -> None:

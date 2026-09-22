@@ -210,7 +210,7 @@ class ObjectReadPlan:
 def plan_object(entry, metadata, request, options):
     """Prune using conservative min/max statistics, then compare seek and scan cost."""
     schema = metadata.arrow.schema.to_arrow_schema()
-    if request.dataset == "flow_points" and metadata.arrow.num_rows != entry.rows:
+    if request.is_daily_file and metadata.arrow.num_rows != entry.rows:
         raise ValueError("基座 Parquet 行数与 day.json 不一致")
     names = set(schema.names)
     if request.columns is not None and set(request.columns) - names:
@@ -246,8 +246,7 @@ def plan_object(entry, metadata, request, options):
         keep = True
         for name in (
             ()
-            if request.dataset == "flow_points"
-            and request.read_strategy == "sequential"
+            if request.is_daily_file and request.read_strategy == "sequential"
             else ("symbol", request.time_column)
         ):
             col = group.column(indexes[name]) if name in indexes else None
@@ -288,7 +287,7 @@ def plan_object(entry, metadata, request, options):
     ranges = coalesce_ranges(chunks, options.coalesce_gap_bytes)
     cost = sum(n for _, n in ranges) + max(0, len(ranges) - 1) * options.seek_cost_bytes
     sequential = (
-        request.dataset != "flow_points"
+        not request.is_daily_file
         and bool(ranges)
         and (
             len(ranges) > 4096
@@ -326,7 +325,7 @@ def split_points_plan(plan, request, options):
         next_chunks, decoded = [], 0
         for j in range(group.num_columns):
             col = group.column(j)
-            if col.path_in_schema not in wanted:
+            if col.path_in_schema.split(".", 1)[0] not in wanted:
                 continue
             offsets = [
                 v
@@ -397,9 +396,7 @@ class SparseFile(io.RawIOBase):
         position = (
             offset
             if whence == 0
-            else self.position + offset
-            if whence == 1
-            else self.size + offset
+            else self.position + offset if whence == 1 else self.size + offset
         )
         if position < 0:
             raise ValueError("negative seek")
@@ -508,22 +505,56 @@ def iter_selective_batches(
     network_retries=3,
     network_retry_backoff=0.25,
     object_request_size=12,
+    output_schema=None,
 ):
     """Plan bounded windows, download coalesced ranges, and return exact Arrow rows."""
     import pyarrow as pa
+    from dataclasses import replace
+    from .derived import align_batch
+
+    def output(batches):
+        for batch in batches:
+            yield (
+                align_batch(batch, output_schema)
+                if output_schema is not None
+                else batch
+            )
 
     def window_batches(window):
         memory_check("metadata_start")
         metadata = load_metadata(
             pool, window, cache, stats, network_retries, network_retry_backoff
         )
+        requests = {}
+        for e in window:
+            local_request = request
+            if output_schema is not None:
+                source_schema = metadata[e.object_id].arrow.schema.to_arrow_schema()
+                for field in output_schema:
+                    if (
+                        field.name in source_schema.names
+                        and source_schema.field(field.name).type != field.type
+                    ):
+                        raise ValueError("派生表字段类型不兼容: " + field.name)
+                    if field.name not in source_schema.names and not field.nullable:
+                        raise ValueError("历史分区缺少必需字段: " + field.name)
+                local_request = replace(
+                    request,
+                    columns=tuple(
+                        c for c in output_schema.names if c in source_schema.names
+                    )
+                    or (request.time_column,),
+                )
+            requests[e.object_id] = local_request
         plans = [
-            plan_object(e, metadata[e.object_id], request, options) for e in window
+            plan_object(e, metadata[e.object_id], requests[e.object_id], options)
+            for e in window
         ]
         active = []
         for plan in plans:
-            if request.dataset == "flow_points" and plan.row_groups:
-                for part in split_points_plan(plan, request, options):
+            local_request = requests[plan.entry.object_id]
+            if request.is_daily_file and plan.row_groups:
+                for part in split_points_plan(plan, local_request, options):
                     stats.planned_bytes += part.transfer_bytes
                     stats.range_count += len(part.ranges)
                     working = (
@@ -541,13 +572,15 @@ def iter_selective_batches(
                             memory_check,
                         )
                         try:
-                            yield from _iter_filtered_batches_from_parquet(
-                                buffers[0],
-                                request,
-                                batch_rows=batch_rows,
-                                memory_check=memory_check,
-                                metadata=part.metadata.arrow,
-                                row_groups=list(part.row_groups),
+                            yield from output(
+                                _iter_filtered_batches_from_parquet(
+                                    buffers[0],
+                                    local_request,
+                                    batch_rows=batch_rows,
+                                    memory_check=memory_check,
+                                    metadata=part.metadata.arrow,
+                                    row_groups=list(part.row_groups),
+                                )
                             )
                         finally:
                             buffers[0].close()
@@ -558,13 +591,18 @@ def iter_selective_batches(
             if not plan.row_groups:
                 stats.skipped_objects += 1
                 schema = plan.metadata.arrow.schema.to_arrow_schema()
-                if request.columns is not None:
+                if local_request.columns is not None:
                     schema = pa.schema(
-                        [schema.field(name) for name in request.columns],
+                        [schema.field(name) for name in local_request.columns],
                         metadata=schema.metadata,
                     )
-                yield pa.RecordBatch.from_arrays(
+                empty = pa.RecordBatch.from_arrays(
                     [pa.array([], type=f.type) for f in schema], schema=schema
+                )
+                yield (
+                    align_batch(empty, output_schema)
+                    if output_schema is not None
+                    else empty
                 )
             else:
                 active.append(plan)
@@ -595,21 +633,21 @@ def iter_selective_batches(
                 )
                 for plan, buffer in zip(selected, buffers):
                     try:
-                        yield from _iter_filtered_batches_from_parquet(
-                            buffer,
-                            request,
-                            batch_rows=batch_rows,
-                            memory_check=memory_check,
-                            metadata=plan.metadata.arrow,
-                            row_groups=list(plan.row_groups),
+                        yield from output(
+                            _iter_filtered_batches_from_parquet(
+                                buffer,
+                                requests[plan.entry.object_id],
+                                batch_rows=batch_rows,
+                                memory_check=memory_check,
+                                metadata=plan.metadata.arrow,
+                                row_groups=list(plan.row_groups),
+                            )
                         )
                     finally:
                         buffer.close()
             first = last
 
-    width = (
-        1 if request.dataset == "flow_points" else min(12, max(1, object_request_size))
-    )
+    width = 1 if request.is_daily_file else min(12, max(1, object_request_size))
     for offset in range(0, len(entries), width):
         try:
             yield from window_batches(entries[offset : offset + width])

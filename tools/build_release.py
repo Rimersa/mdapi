@@ -25,6 +25,7 @@ DOCUMENTS = (
     "BENCHMARK_0_4.md",
     "FLOW_POINTS.md",
     "FLOW_POINTS_BENCHMARK.md",
+    "DERIVED_TABLES.md",
 )
 PACKAGE_DIRECTORIES = ("deploy", "examples", "scripts", "benchmarks")
 ADMIN_TOOLS = (
@@ -32,6 +33,8 @@ ADMIN_TOOLS = (
     "summarize_catalog.py",
     "prewarm.py",
     "warm_metadata.py",
+    "publish_derived_table.py",
+    "publish_daily_quality.py",
 )
 
 

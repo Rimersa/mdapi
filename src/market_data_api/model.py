@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import os
+import re
 from dataclasses import dataclass
 from enum import Enum
 from zoneinfo import ZoneInfo
@@ -11,6 +12,13 @@ DATASETS = ("orders", "trades", "snapshots")
 REQUEST_DATASETS = DATASETS + ("flow_points",)
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 BUCKET_SECONDS = 300
+
+
+def is_derived(dataset):
+    return (
+        isinstance(dataset, str)
+        and re.fullmatch(r"derived\.[a-z][a-z0-9_]{0,63}", dataset) is not None
+    )
 
 
 class UpdateMode(str, Enum):
@@ -88,7 +96,7 @@ class DataRequest:
     read_strategy: str = "auto"
 
     def __post_init__(self) -> None:
-        if self.dataset not in REQUEST_DATASETS:
+        if self.dataset not in REQUEST_DATASETS and not is_derived(self.dataset):
             raise ValueError(f"未知数据集 {self.dataset!r}；可选 {REQUEST_DATASETS}")
         start = parse_datetime(self.start)
         end = parse_datetime(self.end)
@@ -98,8 +106,8 @@ class DataRequest:
         object.__setattr__(self, "end", end)
         object.__setattr__(self, "mode", FetchMode(self.mode))
         object.__setattr__(self, "update", UpdateMode(self.update))
-        if self.dataset == "flow_points" and self.mode != FetchMode.DIRECT:
-            raise ValueError("flow_points 使用 direct 分批读取，不启用整日文件本地缓存")
+        if self.is_daily_file and self.mode != FetchMode.DIRECT:
+            raise ValueError("基座与派生表使用 direct 分批读取，不启用整日文件本地缓存")
         daily_start = parse_daily_time(self.daily_start)
         daily_end = parse_daily_time(self.daily_end)
         if (daily_start is None) != (daily_end is None):
@@ -133,12 +141,16 @@ class DataRequest:
             raise ValueError("ranges 只适用于 direct；cache 模式缓存完整对象")
 
     @property
+    def is_daily_file(self):
+        return self.dataset == "flow_points" or is_derived(self.dataset)
+
+    @property
     def time_column(self):
-        return "time" if self.dataset == "flow_points" else "event_time"
+        return "time" if self.is_daily_file else "event_time"
 
     @property
     def daily_column(self):
-        return "time" if self.dataset == "flow_points" else "time_int"
+        return "time" if self.is_daily_file else "time_int"
 
     @classmethod
     def from_values(
@@ -218,6 +230,7 @@ class DataRequest:
                 or last is None
                 or (
                     raw["dataset"] != "flow_points"
+                    and not is_derived(raw["dataset"])
                     and (not raw.get("daily_start") or not raw.get("daily_end"))
                 )
             ):

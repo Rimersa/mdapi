@@ -90,6 +90,44 @@ class MarketDataClient:
                 )
             return result
 
+    def tables(self, name=None):
+        from .model import is_derived
+
+        if name is not None and not is_derived("derived." + name):
+            raise ValueError("非法派生表名称")
+        with self._request(
+            "/v1/tables" + ("/" + name if name is not None else "")
+        ) as response:
+            return json.load(response)
+
+    def iter_derived(
+        self, table, start_date, end_date, *, symbols=None, columns=None, **kwargs
+    ):
+        yield from self.iter_batches(
+            dict(
+                dataset="derived." + table,
+                start_date=start_date,
+                end_date=end_date,
+                symbols=symbols,
+                columns=columns,
+                **kwargs,
+            )
+        )
+
+    def read_derived(
+        self, table, start_date, end_date, *, symbols=None, columns=None, **kwargs
+    ):
+        return self.read_table(
+            dict(
+                dataset="derived." + table,
+                start_date=start_date,
+                end_date=end_date,
+                symbols=symbols,
+                columns=columns,
+                **kwargs,
+            )
+        )
+
     @contextlib.contextmanager
     def open_stream(self, query: Mapping[str, Any]):
         response = self._request(

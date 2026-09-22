@@ -97,3 +97,5 @@ python tools/build_release.py
 ```
 
 发行包包含 wheel、单文件网关、安装脚本、SHA256SUMS 及文档。`tools/bench_selective.py` 可在开发源码目录进行按需读取与四用户验证；生产数据只读，临时测试账号应放在独立配置中。
+
+派生表通过 `MDAPI_DERIVED_ROOT=/data/flow_points/.derived_tables` 或 `--derived-root` 启用。首次启用需重启；后续发布新表或新增列自动发现。字段、版本和发布工具见 [DERIVED_TABLES.md](DERIVED_TABLES.md)。升级安装保留该配置。
