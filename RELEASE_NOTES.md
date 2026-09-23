@@ -4,6 +4,7 @@
 
 - 新增表就是新建目录；新增列就是按 `time+symbol` 合并写入；旧日期缺新列返回有类型的 null。
 - `tools/upsert_derived_table.py` 与 flow-base 1.7 的 `upsert-table` 提供直接插入入口。
+- `daily_quality` 可直接读取每日每股的最终基座量、独立参考量、差额和有符号偏差；基座量为 0、参考量大于 0 时返回 -100%，参考缺失或分母为 0 时返回 null 及原因。
 - flow-base 质量校验完成后自动写入 `daily_quality`，重刷质量不覆盖后来追加的因子列。
 - 保留 0.7 旧布局迁移工具；迁移不删除旧 `table.json/versions`，旧 0.7 客户端读取时保持原 arrow schema 兼容。
 - 网关仍为纯标准库只读服务，沿用原认证、公平队列、版本固定、按股票/字段筛选和有界读取。
