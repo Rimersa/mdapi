@@ -5,76 +5,7 @@ Market Data API 是一个只读的 A 股五分钟行情访问服务。服务端�
 当前版本：**0.8.0**
 项目地址：<https://github.com/Rimersa/mdapi>
 
-## 每日数据质量（`daily_quality`）
-
-每日每股的连续竞价基座量、独立参考量和有符号偏差可以直接从 API 拉取，不需要再自己对账：
-
-```python
-from market_data_api import MarketDataClient
-
-with MarketDataClient.connect() as client:
-    quality = client.read_derived(
-        "daily_quality",
-        "2026-09-24", "2026-09-29",
-        symbols=["000001.SZ", "600000.SH"],
-        columns=[
-            "date", "symbol",
-            "base_volume",           # 最终基座主买量+主卖量
-            "reference_volume",      # ClickHouse 连续竞价参考量
-            "volume_diff",           # 少为负、多为正、匹配为0
-            "volume_error_ratio",    # -1 即 -100%
-            "volume_error_pct",      # -100 即 -100%
-            "deviation_status",      # 参考不可用/分母为零时说明原因
-        ],
-    )
-```
-
-基座量为 0、参考量大于 0 时如实返回 `-100%`；参考缺失或分母为 0 时百分比为 `null` 并标出原因。API 不按 1% 等阈值删行，是否过滤由调用方决定。`client.tables("daily_quality")` 可查看当前字段和口径；完整说明见 [DERIVED_TABLES.md](DERIVED_TABLES.md)。质量结果由 flow-base 校验完成后**自动写入**，无需发布步骤。
-
-## 数据接口
-
-| 数据集 | 内容 | 时间规则 | 读取模式 |
-|---|---|---|---|
-| `orders` | 逐笔委托 | `start/end` 半开区间；按日期查询需同时提供每日窗口 | `direct` / `cache` |
-| `trades` | 逐笔成交 | 同上 | `direct` / `cache` |
-| `snapshots` | 快照 | 同上 | `direct` / `cache` |
-| `flow_points` | 每日主动成交基座（已识别、分档的事件原表） | `start_date/end_date` 包含首尾日期，默认全天 | `direct` |
-| `derived.<表名>` | 日级质量和任意窗口因子；首表 `daily_quality` | 日期首尾包含，支持股票/字段/窗口筛选 | `direct` |
-
-服务端只读使用现有五分钟 Parquet、catalog v2 和每日基座文件，不会重切、清洗或改写数据。
-
-新增日期、字段和新表通过直接写入目录自动发现，不需要发布清单、升级客户端或重启网关。质量偏差带正负号，参考量大于0而基座量为0时返回-100%；API不按1%等阈值删行。
-
-后续接入新因子：准备按日期存放的Parquet，使用 `upsert` 直接写入对应表目录，再用 `read_derived()` 读取，不需要发布清单或重启网关。新增表、新增列都会自动发现。[完整操作步骤](DERIVED_TABLES.md)覆盖目录格式、质量自动写入、因子插入和窗口表。
-
-## 系统组成
-
-```text
-计算/数据生产端                   数据服务器（网关）                   客户端
-flow-base 生成每日基座   ──►   /data/flow_points          ──►   Python SDK（MarketDataClient.connect）
-                               /data/market_data_5m
-                               mdapi-gateway :18787              或 本机 HTTP 代理 :18788
-```
-
-- 网关：单文件 Python 程序，只依赖 Python 标准库，按用户令牌做公平并发调度。
-- 客户端：Python SDK 原生连接，或启动 `mdapi-local` 使用本机 HTTP API。
-- 用户管理：`mdapi-user` 增删改令牌，网关热加载，无需重启。
-
-## 环境要求
-
-服务端：
-
-- Linux x86_64，`systemd`，`/usr/bin/python3` 为 Python 3.10 或更新版本；
-- 行情数据根目录必须已经存在，且包含 `catalog.json` 和符合 [SERVER_DATA_FORMAT.md](SERVER_DATA_FORMAT.md) 的五分钟 Parquet；
-- 如启用主动成交基座，基座根目录必须已经存在，例如 `/data/flow_points`；
-- 默认监听 `10.10.10.87:18787`，可在配置中修改；
-- 运行账号需要对数据目录有读取权限。
-
-客户端：
-
-- Python 3.10 或更新版本，以及目标环境中的 `pip`；
-- Conda / venv / Notebook 环境需要单独安装客户端 wheel；
-- 能通过 HTTP 访问网关地址和端口。
+> 先看“从零安装”和“使用”；每日质量字段与读取示例见下方“每日数据质量”。
 
 ## 从零安装：服务端
 
@@ -415,6 +346,77 @@ query = {
 - `update`：`missing_only`、`if_changed`、`force`。
 
 `flow_points` 只支持 `direct`。使用 `cache` 时，第一天仍会完整下载所选桶。
+
+## 数据接口
+
+| 数据集 | 内容 | 时间规则 | 读取模式 |
+|---|---|---|---|
+| `orders` | 逐笔委托 | `start/end` 半开区间；按日期查询需同时提供每日窗口 | `direct` / `cache` |
+| `trades` | 逐笔成交 | 同上 | `direct` / `cache` |
+| `snapshots` | 快照 | 同上 | `direct` / `cache` |
+| `flow_points` | 每日主动成交基座（已识别、分档的事件原表） | `start_date/end_date` 包含首尾日期，默认全天 | `direct` |
+| `derived.<表名>` | 日级质量和任意窗口因子；首表 `daily_quality` | 日期首尾包含，支持股票/字段/窗口筛选 | `direct` |
+
+服务端只读使用现有五分钟 Parquet、catalog v2 和每日基座文件，不会重切、清洗或改写数据。
+
+新增日期、字段和新表通过直接写入目录自动发现，不需要发布清单、升级客户端或重启网关。质量偏差带正负号，参考量大于0而基座量为0时返回-100%；API不按1%等阈值删行。
+
+后续接入新因子：准备按日期存放的Parquet，使用 `upsert` 直接写入对应表目录，再用 `read_derived()` 读取，不需要发布清单或重启网关。新增表、新增列都会自动发现。[完整操作步骤](DERIVED_TABLES.md)覆盖目录格式、质量自动写入、因子插入和窗口表。
+
+## 每日数据质量（`daily_quality`）
+
+每日每股的连续竞价基座量、独立参考量和有符号偏差可以直接从 API 拉取，不需要再自己对账：
+
+```python
+from market_data_api import MarketDataClient
+
+with MarketDataClient.connect() as client:
+    quality = client.read_derived(
+        "daily_quality",
+        "2026-09-24", "2026-09-29",
+        symbols=["000001.SZ", "600000.SH"],
+        columns=[
+            "date", "symbol",
+            "base_volume",           # 最终基座主买量+主卖量
+            "reference_volume",      # ClickHouse 连续竞价参考量
+            "volume_diff",           # 少为负、多为正、匹配为0
+            "volume_error_ratio",    # -1 即 -100%
+            "volume_error_pct",      # -100 即 -100%
+            "deviation_status",      # 参考不可用/分母为零时说明原因
+        ],
+    )
+```
+
+基座量为 0、参考量大于 0 时如实返回 `-100%`；参考缺失或分母为 0 时百分比为 `null` 并标出原因。API 不按 1% 等阈值删行，是否过滤由调用方决定。`client.tables("daily_quality")` 可查看当前字段和口径；完整说明见 [DERIVED_TABLES.md](DERIVED_TABLES.md)。质量结果由 flow-base 校验完成后**自动写入**，无需发布步骤。
+
+## 系统组成
+
+```text
+计算/数据生产端                   数据服务器（网关）                   客户端
+flow-base 生成每日基座   ──►   /data/flow_points          ──►   Python SDK（MarketDataClient.connect）
+                               /data/market_data_5m
+                               mdapi-gateway :18787              或 本机 HTTP 代理 :18788
+```
+
+- 网关：单文件 Python 程序，只依赖 Python 标准库，按用户令牌做公平并发调度。
+- 客户端：Python SDK 原生连接，或启动 `mdapi-local` 使用本机 HTTP API。
+- 用户管理：`mdapi-user` 增删改令牌，网关热加载，无需重启。
+
+## 环境要求
+
+服务端：
+
+- Linux x86_64，`systemd`，`/usr/bin/python3` 为 Python 3.10 或更新版本；
+- 行情数据根目录必须已经存在，且包含 `catalog.json` 和符合 [SERVER_DATA_FORMAT.md](SERVER_DATA_FORMAT.md) 的五分钟 Parquet；
+- 如启用主动成交基座，基座根目录必须已经存在，例如 `/data/flow_points`；
+- 默认监听 `10.10.10.87:18787`，可在配置中修改；
+- 运行账号需要对数据目录有读取权限。
+
+客户端：
+
+- Python 3.10 或更新版本，以及目标环境中的 `pip`；
+- Conda / venv / Notebook 环境需要单独安装客户端 wheel；
+- 能通过 HTTP 访问网关地址和端口。
 
 ## 服务器运维
 
