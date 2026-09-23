@@ -1,3 +1,17 @@
+# Market Data API 0.8.0
+
+派生表改为直接目录契约：`<root>/<表名>/trade_date=YYYY-MM-DD/data.parquet`，网关标准库扫描 Parquet footer 自动发现日期与列，不再需要 `table.json`、版本目录或发布步骤。
+
+- 新增表就是新建目录；新增列就是按 `time+symbol` 合并写入；旧日期缺新列返回有类型的 null。
+- `tools/upsert_derived_table.py` 与 flow-base 1.7 的 `upsert-table` 提供直接插入入口。
+- flow-base 质量校验完成后自动写入 `daily_quality`，重刷质量不覆盖后来追加的因子列。
+- 保留 0.7 旧布局迁移工具；迁移不删除旧 `table.json/versions`，旧 0.7 客户端读取时保持原 arrow schema 兼容。
+- 网关仍为纯标准库只读服务，沿用原认证、公平队列、版本固定、按股票/字段筛选和有界读取。
+
+详细目录格式、字段口径和写入示例见 [DERIVED_TABLES.md](DERIVED_TABLES.md)。
+
+---
+
 # Market Data API 0.7.0
 
 增加通用派生表读取：首张`daily_quality`提供每日每股最终主买加主卖基座量、独立参考量和有符号偏差，不按质量阈值过滤。实际基座量为0且参考量大于0时如实返回-100%；无有效分母时返回null及原因。
