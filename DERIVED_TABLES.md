@@ -35,7 +35,7 @@ with MarketDataClient.connect() as client:
 
 | 列 | 类型 | 含义 |
 | --- | --- | --- |
-| `time` | `timestamp[..., tz=Asia/Shanghai]` | 日表为交易日零点；窗口表为窗口锚点时间 |
+| `time` | `timestamp[..., tz=Asia/Shanghai]` | 日表为交易日零点；窗口表为窗口锚点时间；写入工具统一规范为 `timestamp[ns, tz=Asia/Shanghai]`，同表不同日期的单位必须一致 |
 | `symbol` | `string` | 股票代码，如 `000001.SZ` |
 
 其他列任意增加。`data.parquet` 内 `time+symbol` 必须唯一。日级数据如果省略 `time`，写入工具会自动补当天 00:00（Asia/Shanghai）。

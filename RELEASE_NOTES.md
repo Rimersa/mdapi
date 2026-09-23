@@ -1,3 +1,9 @@
+# Market Data API 0.8.1
+
+修复直接目录写入工具的时间戳精度：`upsert_daily` / `upsert-table` 现在统一写 `timestamp[ns, Asia/Shanghai]`，与 0.7 迁移后的 `daily_quality` 历史分片保持一致。0.8.0 曾把新日期写成 `timestamp[us]`，与旧分片的 `ns` 混用会导致网关报“time 字段类型不一致”。本版本仅修复写入精度并补充回归测试，不改变字段口径和读取接口。
+
+---
+
 # Market Data API 0.8.0
 
 派生表改为直接目录契约：`<root>/<表名>/trade_date=YYYY-MM-DD/data.parquet`，网关标准库扫描 Parquet footer 自动发现日期与列，不再需要 `table.json`、版本目录或发布步骤。

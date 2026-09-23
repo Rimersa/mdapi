@@ -217,6 +217,7 @@ def test_upsert_merges_columns_and_window_tables(tmp_path):
     table = pq.ParquetFile(
         root / "daily_quality/trade_date=2026-09-01/data.parquet"
     ).read()
+    assert table.schema.field("time").type == pa.timestamp("ns", tz="Asia/Shanghai")
     assert table["order_buy_amount_3"].to_pylist() == [11.5, 22.5, None]
     assert table["tick_volume"].to_pylist() == [0, 99, 101]
     assert table["time"].to_pylist()[0].date().isoformat() == "2026-09-01"
@@ -281,3 +282,35 @@ def test_coverage_keeps_legacy_arrow_schema(tmp_path):
     _, coverage = DerivedStore(root).selection(req)
     assert coverage["table"]["columns"]
     assert coverage["table"].get("arrow_schema")
+
+
+def test_upsert_normalizes_time_microseconds_to_nanoseconds(tmp_path):
+    root = tmp_path / "derived"
+    old = pa.table(
+        {
+            "time": pa.array(
+                [dt.datetime(2026, 9, 1, tzinfo=SHANGHAI)],
+                type=pa.timestamp("ns", tz="Asia/Shanghai"),
+            ),
+            "symbol": ["000001.SZ"],
+            "base_volume": pa.array([1], type=pa.int64()),
+        }
+    )
+    upsert_daily(root, "daily_quality", "2026-09-01", old)
+    new = pa.table(
+        {
+            "time": pa.array(
+                [dt.datetime(2026, 9, 1, tzinfo=SHANGHAI)],
+                type=pa.timestamp("us", tz="Asia/Shanghai"),
+            ),
+            "symbol": ["000001.SZ"],
+            "factor": pa.array([2.0]),
+        }
+    )
+    upsert_daily(root, "daily_quality", "2026-09-01", new)
+    table = pq.ParquetFile(
+        root / "daily_quality/trade_date=2026-09-01/data.parquet"
+    ).read()
+    assert table.schema.field("time").type == pa.timestamp("ns", tz="Asia/Shanghai")
+    assert table["factor"].to_pylist() == [2.0]
+    assert table["base_volume"].to_pylist() == [1]

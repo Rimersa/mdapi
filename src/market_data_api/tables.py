@@ -83,7 +83,7 @@ def _coerce_time(table, day):
     import pyarrow as pa
     import pyarrow.compute as pc
 
-    target_type = pa.timestamp("us", tz="Asia/Shanghai")
+    target_type = pa.timestamp("ns", tz="Asia/Shanghai")
     if "time" not in table.column_names:
         midnight = dt.datetime.combine(dt.date.fromisoformat(day), dt.time(), SHANGHAI)
         table = table.append_column("time", pa.array([midnight] * table.num_rows, type=target_type))
