@@ -1,3 +1,9 @@
+# Market Data API 0.8.2
+
+不再在 `market_data_api` 包中附带派生表写入工具。写入实现已移到 flow-base 内部（`flow_base/derived_writer.py`），API 包恢复为只读客户端/网关包；质量自动写入和因子 `upsert-table` 行为不变。读取接口、网关协议和生产服务不受影响。这一调整是为了避免以后修改写入逻辑时错误地牵动 API 包版本。
+
+---
+
 # Market Data API 0.8.1
 
 修复直接目录写入工具的时间戳精度：`upsert_daily` / `upsert-table` 现在统一写 `timestamp[ns, Asia/Shanghai]`，与 0.7 迁移后的 `daily_quality` 历史分片保持一致。0.8.0 曾把新日期写成 `timestamp[us]`，与旧分片的 `ns` 混用会导致网关报“time 字段类型不一致”。本版本仅修复写入精度并补充回归测试，不改变字段口径和读取接口。
@@ -9,7 +15,7 @@
 派生表改为直接目录契约：`<root>/<表名>/trade_date=YYYY-MM-DD/data.parquet`，网关标准库扫描 Parquet footer 自动发现日期与列，不再需要 `table.json`、版本目录或发布步骤。
 
 - 新增表就是新建目录；新增列就是按 `time+symbol` 合并写入；旧日期缺新列返回有类型的 null。
-- `tools/upsert_derived_table.py` 与 flow-base 1.7 的 `upsert-table` 提供直接插入入口。
+- `tools/upsert_derived_table.py`（0.8.2 起已移出 API 包）与 flow-base 1.7 的 `upsert-table` 提供直接插入入口。
 - `daily_quality` 可直接读取每日每股的最终基座量、独立参考量、差额和有符号偏差；基座量为 0、参考量大于 0 时返回 -100%，参考缺失或分母为 0 时返回 null 及原因。
 - flow-base 质量校验完成后自动写入 `daily_quality`，重刷质量不覆盖后来追加的因子列。
 - 保留 0.7 旧布局迁移工具；迁移不删除旧 `table.json/versions`，旧 0.7 客户端读取时保持原 arrow schema 兼容。

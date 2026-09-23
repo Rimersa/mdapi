@@ -6,10 +6,10 @@
 
 1. 准备数据根目录，例如 `/data/market_data_5m`，其中必须包含 `catalog.json` 和五分钟 Parquet。主动成交基座目录例如 `/data/flow_points`。
 
-2. 下载 0.8.1 发布包：
+2. 下载 0.8.2 发布包：
 
 ```bash
-VERSION=0.8.1
+VERSION=0.8.2
 curl -LO "https://github.com/Rimersa/mdapi/releases/download/v${VERSION}/market-data-api-${VERSION}-easy-install.tar.gz"
 curl -LO "https://github.com/Rimersa/mdapi/releases/download/v${VERSION}/market-data-api-${VERSION}-easy-install.tar.gz.sha256"
 sha256sum -c "market-data-api-${VERSION}-easy-install.tar.gz.sha256"
@@ -57,7 +57,7 @@ sudo /usr/local/sbin/mdapi-user add alice
 curl http://10.10.10.87:18787/health
 ```
 
-确认 `"version":"0.8.1"`、`"flow_points_enabled":true`，能力列表包含 `"daily_points_v1"`。
+确认 `"version":"0.8.2"`、`"flow_points_enabled":true`，能力列表包含 `"daily_points_v1"`。
 
 ## 客户端
 

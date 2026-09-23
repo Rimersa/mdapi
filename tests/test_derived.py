@@ -6,6 +6,7 @@ import json
 import threading
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -23,7 +24,6 @@ from market_data_api.model import DataRequest, SHANGHAI
 from market_data_api.native import RemoteMarketDataClient
 from market_data_api.sdk import MarketDataAPIError
 from market_data_api.service import DataService
-from market_data_api.tables import upsert_daily
 
 
 class QuietHandler(MarketDataGatewayHandler):
@@ -59,7 +59,7 @@ def quality_table(day, *, extra=False, window=False, values=None):
 
 
 def write_table_rows(root, table, day, rows):
-    upsert_daily(root, table, day, pa.Table.from_pylist(rows))
+    write_day(root, table, day, pa.Table.from_pylist(rows))
 
 
 @contextlib.contextmanager
@@ -96,14 +96,34 @@ def running(tmp_path):
         thread.join(3)
 
 
+
+
+def write_day(root, table, day, data, **kwargs):
+    """Test-only helper: atomically write the canonical direct-table day file."""
+    import os
+    import uuid
+
+    path = Path(root) / table / ("trade_date=" + day) / "data.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(".data-" + uuid.uuid4().hex + ".parquet")
+    pq.write_table(data, temporary, compression="zstd", store_schema=True)
+    os.replace(temporary, path)
+    return {
+        "table": table,
+        "date": day,
+        "path": str(path),
+        "rows": data.num_rows,
+        "columns": data.column_names,
+    }
+
 def test_direct_columns_tables_and_typed_history_nulls(tmp_path):
     with running(tmp_path) as (root, client, server):
-        upsert_daily(root, "daily_quality", "2026-09-01", quality_table("2026-09-01"))
+        write_day(root, "daily_quality", "2026-09-01", quality_table("2026-09-01"))
         got = client.read_derived("daily_quality", "2026-09-01", "2026-09-01")
         assert got["volume_error_pct"].to_pylist() == [-100.0, -1.0, 1.0]
         assert client.tables()["tables"][0]["name"] == "daily_quality"
         # Same server and same client instance must discover a later column.
-        upsert_daily(
+        write_day(
             root,
             "daily_quality",
             "2026-09-02",
@@ -140,7 +160,7 @@ def test_direct_columns_tables_and_typed_history_nulls(tmp_path):
                 "daily_quality", "2026-09-01", "2026-09-02", columns=["typo"]
             )
         # A window table is just another directory; no server/client release needed.
-        upsert_daily(
+        write_day(
             root,
             "orders_5m",
             "2026-09-03",
@@ -164,7 +184,7 @@ def test_direct_columns_tables_and_typed_history_nulls(tmp_path):
 
 def test_pinned_plan_rejects_mixed_file_replacements(tmp_path):
     with running(tmp_path) as (root, client, server):
-        upsert_daily(root, "daily_quality", "2026-09-01", quality_table("2026-09-01"))
+        write_day(root, "daily_quality", "2026-09-01", quality_table("2026-09-01"))
         req = DataRequest.from_query(
             dict(
                 dataset="derived.daily_quality",
@@ -177,7 +197,7 @@ def test_pinned_plan_rejects_mixed_file_replacements(tmp_path):
         path = store.path_for(entry)
         # A writer atomically replaces the file; the old plan must not silently
         # combine the old manifest with new bytes.
-        upsert_daily(
+        write_day(
             root,
             "daily_quality",
             "2026-09-01",
@@ -192,7 +212,7 @@ def test_pinned_plan_rejects_mixed_file_replacements(tmp_path):
 
 def test_registry_auth_name_validation(tmp_path):
     with running(tmp_path) as (root, client, server):
-        upsert_daily(root, "daily_quality", "2026-09-01", quality_table("2026-09-01"))
+        write_day(root, "daily_quality", "2026-09-01", quality_table("2026-09-01"))
         with pytest.raises(urllib.error.HTTPError) as error:
             urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/v1/tables")
         assert error.value.code == 401
@@ -203,49 +223,12 @@ def test_registry_auth_name_validation(tmp_path):
                 )
 
 
-def test_upsert_merges_columns_and_window_tables(tmp_path):
-    root = tmp_path / "derived"
-    upsert_daily(
-        root, "daily_quality", "2026-09-01", quality_table("2026-09-01")
-    )
-    upsert_daily(
-        root,
-        "daily_quality",
-        "2026-09-01",
-        pa.table({"symbol": ["000001.SZ", "000002.SZ"], "order_buy_amount_3": [11.5, 22.5]}),
-    )
-    table = pq.ParquetFile(
-        root / "daily_quality/trade_date=2026-09-01/data.parquet"
-    ).read()
-    assert table.schema.field("time").type == pa.timestamp("ns", tz="Asia/Shanghai")
-    assert table["order_buy_amount_3"].to_pylist() == [11.5, 22.5, None]
-    assert table["tick_volume"].to_pylist() == [0, 99, 101]
-    assert table["time"].to_pylist()[0].date().isoformat() == "2026-09-01"
-
-    upsert_daily(
-        root,
-        "orders_5m",
-        "2026-09-02",
-        quality_table("2026-09-02", window=True),
-        granularity="5m",
-        description="test window table",
-    )
-    meta = DerivedStore(root).describe("orders_5m")
-    assert meta["granularity"] == "5m"
-    assert meta["description"] == "test window table"
-    assert any(c["name"] == "volume_error_pct" for c in meta["columns"])
-
-    bad = pa.table({"symbol": ["000001.SZ"], "tick_volume": ["not-an-int"]})
-    with pytest.raises(ValueError, match="类型"):
-        upsert_daily(root, "daily_quality", "2026-09-01", bad)
-
-
 def test_local_http_schema_discovery_and_arrow(tmp_path):
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
 
     with running(tmp_path) as (root, client, server):
-        upsert_daily(root, "daily_quality", "2026-09-01", quality_table("2026-09-01"))
+        write_day(root, "daily_quality", "2026-09-01", quality_table("2026-09-01"))
         service = DataService(
             gateway_host="127.0.0.1",
             gateway_port=server.server_port,
@@ -271,7 +254,7 @@ def test_local_http_schema_discovery_and_arrow(tmp_path):
 
 def test_coverage_keeps_legacy_arrow_schema(tmp_path):
     root = tmp_path / "derived"
-    upsert_daily(root, "daily_quality", "2026-09-01", quality_table("2026-09-01"))
+    write_day(root, "daily_quality", "2026-09-01", quality_table("2026-09-01"))
     req = DataRequest.from_query(
         dict(
             dataset="derived.daily_quality",
@@ -282,35 +265,3 @@ def test_coverage_keeps_legacy_arrow_schema(tmp_path):
     _, coverage = DerivedStore(root).selection(req)
     assert coverage["table"]["columns"]
     assert coverage["table"].get("arrow_schema")
-
-
-def test_upsert_normalizes_time_microseconds_to_nanoseconds(tmp_path):
-    root = tmp_path / "derived"
-    old = pa.table(
-        {
-            "time": pa.array(
-                [dt.datetime(2026, 9, 1, tzinfo=SHANGHAI)],
-                type=pa.timestamp("ns", tz="Asia/Shanghai"),
-            ),
-            "symbol": ["000001.SZ"],
-            "base_volume": pa.array([1], type=pa.int64()),
-        }
-    )
-    upsert_daily(root, "daily_quality", "2026-09-01", old)
-    new = pa.table(
-        {
-            "time": pa.array(
-                [dt.datetime(2026, 9, 1, tzinfo=SHANGHAI)],
-                type=pa.timestamp("us", tz="Asia/Shanghai"),
-            ),
-            "symbol": ["000001.SZ"],
-            "factor": pa.array([2.0]),
-        }
-    )
-    upsert_daily(root, "daily_quality", "2026-09-01", new)
-    table = pq.ParquetFile(
-        root / "daily_quality/trade_date=2026-09-01/data.parquet"
-    ).read()
-    assert table.schema.field("time").type == pa.timestamp("ns", tz="Asia/Shanghai")
-    assert table["factor"].to_pylist() == [2.0]
-    assert table["base_volume"].to_pylist() == [1]

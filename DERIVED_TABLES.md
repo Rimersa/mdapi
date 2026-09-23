@@ -55,15 +55,7 @@ with MarketDataClient.connect() as client:
 
 ### 方式一：0.8.0 管理环境直接插入
 
-```bash
-python tools/upsert_derived_table.py \
-  --root /data/flow_points/.derived_tables \
-  --table daily_quality \
-  --date 2026-09-23 \
-  --input /path/to/factor.parquet
-```
-
-### 方式二：flow-base 1.7 发布包内自带命令
+写入工具随 flow-base 发布包提供；`market_data_api` 包保持纯读取。
 
 ```bash
 ./flow-base upsert-table \

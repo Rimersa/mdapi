@@ -33,7 +33,6 @@ ADMIN_TOOLS = (
     "summarize_catalog.py",
     "prewarm.py",
     "warm_metadata.py",
-    "upsert_derived_table.py",
     "migrate_derived_direct.py",
 )
 
